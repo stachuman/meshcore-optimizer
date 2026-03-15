@@ -200,13 +200,20 @@ def load_config(filename: str) -> Config:
 
 def save_config(config: Config, filename: str):
     """Save configuration to JSON file."""
+    radio = {"protocol": config.radio.protocol}
+    if config.radio.host:
+        radio["host"] = config.radio.host
+        radio["port"] = config.radio.port
+    if config.radio.serial_port:
+        radio["serial_port"] = config.radio.serial_port
+        radio["baudrate"] = config.radio.baudrate
+    if config.radio.ble_address:
+        radio["ble_address"] = config.radio.ble_address
+    if config.radio.meshcore_cli:
+        radio["meshcore_cli"] = config.radio.meshcore_cli
+
     data = {
-        "radio": {
-            "protocol": config.radio.protocol,
-            "host": config.radio.host,
-            "port": config.radio.port,
-            "meshcore_cli": config.radio.meshcore_cli,
-        },
+        "radio": radio,
         "companion_prefix": config.companion_prefix,
         "discovery": {
             "max_rounds": config.discovery_max_rounds,
@@ -222,12 +229,6 @@ def save_config(config: Config, filename: str):
         ],
         "default_guest_passwords": config.default_guest_passwords,
     }
-    # Include optional fields only if set
-    if config.radio.serial_port:
-        data["radio"]["serial_port"] = config.radio.serial_port
-        data["radio"]["baudrate"] = config.radio.baudrate
-    if config.radio.ble_address:
-        data["radio"]["ble_address"] = config.radio.ble_address
 
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
@@ -298,7 +299,7 @@ class DiscoveryState:
         )
 
 
-def _state_file_for(save_file: str) -> str:
+def state_file_for(save_file: str) -> str:
     """Derive discovery state filename from topology filename."""
     base, ext = os.path.splitext(save_file or "topology.json")
     return f"{base}_discovery_state{ext}"
@@ -557,6 +558,8 @@ async def _login_and_neighbors(mc, contact, node, password_entry,
             return False, 0, f"login rejected ({pw_display})", ""
 
         # Step 2: wait for actual LOGIN_SUCCESS over the air
+        # Divide by 800 (not 1000) to give ~25% extra margin over the
+        # suggested timeout (which is in milliseconds).
         login_timeout = login_result.payload.get("suggested_timeout", 0) / 800
         if isinstance(contact, dict) and contact.get("timeout", 0) != 0:
             login_timeout = contact["timeout"]
@@ -579,6 +582,26 @@ async def _login_and_neighbors(mc, contact, node, password_entry,
         else:
             print(f"      RX: Login failed ({pw_display}): {login_event.type}")
             return False, 0, f"login failed ({pw_display})", ""
+
+        # Fetch node status (cheap single-packet request, same session)
+        try:
+            print(f"      TX: Requesting status from {node.name}...")
+            status_data = await mc.commands.req_status_sync(
+                contact, min_timeout=timeout)
+            if status_data:
+                node.status = status_data
+                node.status_timestamp = datetime.now().isoformat(
+                    timespec='seconds')
+                bat_mv = status_data.get('bat', 0)
+                tx_q = status_data.get('tx_queue_len', 0)
+                full = status_data.get('full_evts', 0)
+                uptime_h = status_data.get('uptime', 0) / 3600
+                print(f"      RX: Status — bat:{bat_mv}mV  txq:{tx_q}  "
+                      f"full_evts:{full}  uptime:{uptime_h:.1f}h")
+            else:
+                print(f"      RX: Status request returned no data")
+        except Exception as e:
+            print(f"      RX: Status error (non-fatal): {e}")
 
         # Fetch neighbors via binary API (same call as meshcore-cli)
         # Use min_timeout to ensure enough time for multi-hop round trips.
@@ -680,7 +703,8 @@ class _DiscoveryCtx:
 
     def __init__(self, mc, graph, companion_prefix, contact_map, name_map,
                  ds, passwords, default_guest_passwords, timeout, delay,
-                 infer_penalty, radio_config, save_file, state_file):
+                 infer_penalty, radio_config, save_file, state_file,
+                 alt_snr_gap=10.0):
         self.mc = mc
         self.graph = graph
         self.companion_prefix = companion_prefix
@@ -695,6 +719,7 @@ class _DiscoveryCtx:
         self.radio_config = radio_config
         self.save_file = save_file
         self.state_file = state_file
+        self.alt_snr_gap = alt_snr_gap
 
     def fix_names(self):
         """Update node names and locations from contact data."""
@@ -739,6 +764,21 @@ class _DiscoveryCtx:
             except Exception as e:
                 print(f"    Could not set path: {e}")
 
+    def filter_alternatives(self, alt_paths):
+        """Drop alternatives whose bottleneck is too far below primary."""
+        if not alt_paths or self.alt_snr_gap <= 0:
+            return alt_paths
+        primary_snr = alt_paths[0].bottleneck_snr
+        kept = []
+        for i, p in enumerate(alt_paths):
+            if i == 0 or p.bottleneck_snr >= primary_snr - self.alt_snr_gap:
+                kept.append(p)
+            else:
+                print(f"    Skipping Alt {i}: "
+                      f"{p.bottleneck_snr:+.1f} dB "
+                      f"(too weak vs primary {primary_snr:+.1f} dB)")
+        return kept
+
     async def refresh_contacts(self):
         """Re-fetch contacts — radio may have heard new advertisements."""
         try:
@@ -761,9 +801,9 @@ class _DiscoveryCtx:
 
 async def _run_round0(ctx: _DiscoveryCtx):
     """Round 0: Login to companion repeater, fetch neighbor table to seed graph."""
-    print(f"\n  {'='*60}")
+    print(f"\n  {'='*30}")
     print(f"  ROUND 0: Querying companion repeater [{ctx.companion_prefix}]")
-    print(f"  {'='*60}")
+    print(f"  {'='*30}")
 
     companion_contact = ctx.contact_map.get(ctx.companion_prefix)
     if not companion_contact:
@@ -890,6 +930,7 @@ async def _run_trace_phase(ctx: _DiscoveryCtx):
             ctx.graph, ctx.companion_prefix, best_prefix, k=3)
         if not alt_paths:
             alt_paths = [best_path]
+        alt_paths = ctx.filter_alternatives(alt_paths)
 
         for pi, path_result in enumerate(alt_paths):
             label = "Primary" if pi == 0 else f"Alt {pi}"
@@ -976,6 +1017,7 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
             ctx.graph, ctx.companion_prefix, prefix, k=3)
         if not alt_paths:
             continue
+        alt_paths = ctx.filter_alternatives(alt_paths)
 
         print(f"\n    --- {node.name} [{prefix}] ---")
 
@@ -1069,7 +1111,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
     if default_guest_passwords is None:
         default_guest_passwords = DEFAULT_GUEST_PASSWORDS
 
-    state_file = _state_file_for(save_file)
+    state_file = state_file_for(save_file)
 
     # --- Build contact_map from radio ---
     contact_map = {}
@@ -1128,22 +1170,22 @@ async def progressive_discovery(mc, graph: NetworkGraph,
             pass
 
     if resumed:
-        print("\n" + "=" * 72)
+        print("\n" + "=" * 40)
         print("  RESUMING PROGRESSIVE TOPOLOGY DISCOVERY")
         print(f"  Resumed: {datetime.now().isoformat(timespec='seconds')}")
         print(f"  Companion: {companion_prefix}")
         print(f"  Already traced: {len(ds.traced_set)}  "
               f"Already logged in: {len(ds.logged_in_set)}")
         print(f"  Continuing from round {ds.current_round + 1}")
-        print("=" * 72)
+        print("=" * 40)
         start_round = ds.current_round + 1
     else:
-        print("\n" + "=" * 72)
+        print("\n" + "=" * 40)
         print("  MESHCORE PROGRESSIVE TOPOLOGY DISCOVERY")
         print(f"  Started: {datetime.now().isoformat(timespec='seconds')}")
         print(f"  Companion: {companion_prefix}")
         print(f"  Max rounds: {max_rounds}")
-        print("=" * 72)
+        print("=" * 40)
         ds.traced_set.add(companion_prefix)
         ds.logged_in_set.add(companion_prefix)
         start_round = 0
@@ -1172,9 +1214,9 @@ async def progressive_discovery(mc, graph: NetworkGraph,
             round_start = time.monotonic()
             round_edges_before = graph.stats()['edges']
 
-            print(f"\n  {'='*60}")
+            print(f"\n  {'='*30}")
             print(f"  ROUND {round_num}")
-            print(f"  {'='*60}")
+            print(f"  {'='*30}")
 
             await ctx.refresh_contacts()
             trace_count = await _run_trace_phase(ctx)
@@ -1215,9 +1257,9 @@ async def progressive_discovery(mc, graph: NetworkGraph,
             os.remove(state_file)
 
     # --- Final report ---
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 40)
     print(f"  DISCOVERY {'STOPPED' if stopped else 'COMPLETE'}")
-    print("=" * 72)
+    print("=" * 40)
 
     print_topology_report(graph)
     results = all_pairs_widest(graph)
@@ -1238,10 +1280,10 @@ def plan_discovery(graph: NetworkGraph,
     if default_guest_passwords is None:
         default_guest_passwords = DEFAULT_GUEST_PASSWORDS
 
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 40)
     print("  DISCOVERY PLAN (dry run)")
     print(f"  Companion: {companion_prefix}")
-    print("=" * 72)
+    print("=" * 40)
 
     comp_node = graph.get_node(companion_prefix)
     if not comp_node:

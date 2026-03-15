@@ -47,6 +47,8 @@ class RepeaterNode:
     access_level: str = "none"  # "admin", "guest", "none"
     password: str = ""          # admin or guest password (if known)
     last_seen: str = ""         # ISO timestamp
+    status: dict = field(default_factory=dict)    # raw status from req_status
+    status_timestamp: str = ""                     # ISO timestamp of last fetch
 
     def __hash__(self):
         return hash(self.prefix)
@@ -55,6 +57,56 @@ class RepeaterNode:
         if isinstance(other, RepeaterNode):
             return self.prefix == other.prefix
         return False
+
+    @property
+    def health_penalty(self) -> float:
+        """Health penalty in dB (0.0 = healthy, higher = worse)."""
+        return compute_node_health_penalty(self.status)
+
+
+def compute_node_health_penalty(status: dict) -> float:
+    """
+    Compute a health penalty in dB from repeater status data.
+    Returns 0.0 for healthy nodes, positive values for degraded nodes.
+    The penalty reduces effective path SNR when routing through this node.
+    """
+    if not status:
+        return 0.0
+
+    penalty = 0.0
+
+    # Battery: critical below 3300mV, warning below 3500mV
+    bat = status.get("bat", 4200)
+    if bat < 3300:
+        penalty += 6.0
+    elif bat < 3500:
+        penalty += 2.0
+
+    # TX queue congestion
+    tx_queue = status.get("tx_queue_len", 0)
+    if tx_queue > 5:
+        penalty += 4.0
+    elif tx_queue > 0:
+        penalty += 1.0
+
+    # Event queue overflows indicate chronic overload
+    full_evts = status.get("full_evts", 0)
+    if full_evts > 10:
+        penalty += 4.0
+    elif full_evts > 0:
+        penalty += min(full_evts * 0.5, 3.0)
+
+    # Flood duplicate rate: recv_flood includes dups, flood_dups is the subset
+    recv_flood = status.get("recv_flood", 0)
+    flood_dups = status.get("flood_dups", 0)
+    if recv_flood > 100:
+        dup_rate = flood_dups / recv_flood
+        if dup_rate > 0.7:
+            penalty += 3.0
+        elif dup_rate > 0.5:
+            penalty += 1.0
+
+    return penalty
 
 
 @dataclass
@@ -458,7 +510,7 @@ class NetworkGraph:
             "edges": [],
         }
         for prefix, node in self.nodes.items():
-            data["nodes"][prefix] = {
+            nd = {
                 "name": node.name,
                 "prefix": node.prefix,
                 "public_key": node.public_key,
@@ -467,6 +519,10 @@ class NetworkGraph:
                 "access_level": node.access_level,
                 "last_seen": node.last_seen,
             }
+            if node.status:
+                nd["status"] = node.status
+                nd["status_timestamp"] = node.status_timestamp
+            data["nodes"][prefix] = nd
         for from_p, edges in self.edges.items():
             for edge in edges:
                 data["edges"].append({
@@ -499,6 +555,8 @@ class NetworkGraph:
                 lon=nd.get("lon", 0),
                 access_level=nd.get("access_level", "none"),
                 last_seen=nd.get("last_seen", ""),
+                status=nd.get("status", {}),
+                status_timestamp=nd.get("status_timestamp", ""),
             ))
 
         for ed in data.get("edges", []):
@@ -543,7 +601,8 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                 dest_prefix: str,
                 min_snr_threshold: float = -15.0,
                 excluded_intermediates: set = None,
-                excluded_edges: set = None) -> PathResult:
+                excluded_edges: set = None,
+                use_node_health: bool = False) -> PathResult:
     """
     Find the path with maximum bottleneck SNR (widest path).
 
@@ -562,6 +621,7 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
         excluded_intermediates: nodes to avoid as intermediates
                                 (source and dest are never excluded)
         excluded_edges: set of (from_prefix, to_prefix) tuples to skip
+        use_node_health: apply health penalty for unhealthy intermediates
 
     Returns:
         PathResult with the optimal path
@@ -622,6 +682,10 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                                 reverse_edge.snr_db if reverse_edge
                                 else edge.snr_db)
 
+            # Apply node health penalty for intermediate nodes
+            if use_node_health and v != dest and v in graph.nodes:
+                effective_snr -= graph.nodes[v].health_penalty
+
             # Skip edges below threshold
             if effective_snr < min_snr_threshold:
                 continue
@@ -673,7 +737,8 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
 
 def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
                              dest_prefix: str, k: int = 3,
-                             min_snr_threshold: float = -15.0
+                             min_snr_threshold: float = -15.0,
+                             use_node_health: bool = False
                              ) -> list[PathResult]:
     """
     Find up to k alternative paths, each avoiding intermediates of
@@ -689,7 +754,8 @@ def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
         pr = widest_path(graph, source_prefix, dest_prefix,
                          min_snr_threshold=min_snr_threshold,
                          excluded_intermediates=excluded,
-                         excluded_edges=blocked_edges)
+                         excluded_edges=blocked_edges,
+                         use_node_health=use_node_health)
         if not pr.found:
             break
         path_key = tuple(pr.path)

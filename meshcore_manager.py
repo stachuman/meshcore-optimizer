@@ -13,7 +13,7 @@ Workflows:
   5. Manage config     — passwords, export, import
 
 Requirements:
-    pip install meshcore meshcore-cli
+    pip install meshcore
 
 Author: Stan (Gdańsk MeshCore Network)
 License: MIT
@@ -34,7 +34,7 @@ from meshcore_discovery import (
     RepeaterAccess, DEFAULT_GUEST_PASSWORDS,
     match_passwords, load_passwords, plan_discovery,
     Config, RadioConfig, load_config, save_config, connect_radio,
-    progressive_discovery, DiscoveryState, _state_file_for,
+    progressive_discovery, DiscoveryState, state_file_for,
 )
 
 
@@ -158,6 +158,7 @@ def main_menu(state: AppState):
         options = []
         options.append(("d", "Discover network (auto-scan via radio)"))
         options.append(("f", "Find path between repeaters"))
+        options.append(("w", "Web map (open in browser)"))
         options.append(("r", "Network report (topology, matrix, stats)"))
         options.append(("m", "Manual topology edit"))
         options.append(("s", "Settings (radio, companion, passwords)"))
@@ -169,6 +170,8 @@ def main_menu(state: AppState):
             auto_discovery_menu(state)
         elif choice == "f":
             find_path_menu(state)
+        elif choice == "w":
+            launch_web_map(state)
         elif choice == "r":
             network_report_menu(state)
         elif choice == "m":
@@ -180,6 +183,33 @@ def main_menu(state: AppState):
                 save_topology(state)
             print(f"\n  {c('Bye! 73', GREEN)}\n")
             break
+
+
+_map_server_url = None
+
+def launch_web_map(state: AppState):
+    global _map_server_url
+    from meshcore_web import start_map_server
+
+    if _map_server_url:
+        print(f"  Map already running: {c(_map_server_url, CYAN)}")
+        pause()
+        return
+
+    # Save topology first so the map has fresh data
+    if state.has_topology:
+        state.graph.save(state.topology_file)
+
+    _map_server_url = start_map_server(
+        topology_file=state.topology_file,
+        companion_prefix=state.companion_prefix,
+        port=8080,
+        config_file=state.config_file,
+    )
+    print(f"  Map started: {c(_map_server_url, CYAN)}")
+    print(f"  Open this URL in a browser on any device on your network.")
+    print(f"  Map auto-refreshes during discovery.")
+    pause()
 
 
 # ---------------------------------------------------------------------------
@@ -466,8 +496,15 @@ def find_path_ab(state: AppState):
         print(f"  {c('Node not found', RED)}")
         return
 
+    # Offer health-aware routing if any nodes have status data
+    use_health = False
+    health_nodes = [n for n in state.graph.nodes.values() if n.status]
+    if health_nodes:
+        use_health = confirm("Factor in node health?")
+
     alternatives = widest_path_alternatives(state.graph, src.prefix,
-                                             dst.prefix, k=3)
+                                             dst.prefix, k=3,
+                                             use_node_health=use_health)
     if not alternatives:
         print(f"\n  {c('No path found.', RED)}")
         pause()
@@ -476,6 +513,15 @@ def find_path_ab(state: AppState):
     result = alternatives[0]
     print_path_result(result, state.graph)
 
+    if use_health:
+        # Show if health changed the path vs SNR-only
+        snr_only = widest_path_alternatives(state.graph, src.prefix,
+                                             dst.prefix, k=1)
+        if snr_only and snr_only[0].path != result.path:
+            print(f"\n  {c('Note: Health penalties changed the optimal path', YELLOW)}")
+            print(f"  SNR-only path: {' -> '.join(snr_only[0].path_names)}  "
+                  f"({snr_only[0].bottleneck_snr:+.1f} dB)")
+
     # Show alternative forward paths
     for i, alt in enumerate(alternatives[1:], 2):
         print(f"\n  {c(f'Alternative {i}:', DIM)}")
@@ -483,7 +529,8 @@ def find_path_ab(state: AppState):
 
     # Reverse paths (calculated independently — may use different intermediates)
     rev_alternatives = widest_path_alternatives(state.graph, dst.prefix,
-                                                src.prefix, k=3)
+                                                src.prefix, k=3,
+                                                use_node_health=use_health)
     if rev_alternatives:
         print(f"\n  {c('Reverse path:', DIM)}")
         print_path_result(rev_alternatives[0], state.graph)
@@ -511,7 +558,6 @@ def find_path_ab(state: AppState):
     pause()
 
 
-
 # ---------------------------------------------------------------------------
 # 3. Network Overview
 # ---------------------------------------------------------------------------
@@ -530,6 +576,7 @@ def network_report_menu(state: AppState):
             ("m", "All-pairs bottleneck matrix"),
             ("s", "Statistics summary"),
             ("w", "Weak links"),
+            ("h", "Node health report"),
             ("b", "Back"),
         ])
 
@@ -544,6 +591,8 @@ def network_report_menu(state: AppState):
             show_statistics(state)
         elif choice == "w":
             weak_links_report(state)
+        elif choice == "h":
+            health_report(state)
         elif choice == "b":
             break
 
@@ -615,6 +664,64 @@ def weak_links_report(state: AppState):
         marginal = sum(1 for s, _, _, _ in weak if -10 <= s < 0)
         print(f"\n  Critical (<-10 dB): {critical}")
         print(f"  Marginal (0 to -10 dB): {marginal}")
+
+    pause()
+
+
+def health_report(state: AppState):
+    subheader("Node Health Report")
+
+    nodes_with_status = [
+        n for n in state.graph.nodes.values() if n.status
+    ]
+
+    if not nodes_with_status:
+        print(f"  {c('No status data. Run discovery to collect.', DIM)}")
+        pause()
+        return
+
+    # Worst health first
+    nodes_with_status.sort(key=lambda n: n.health_penalty, reverse=True)
+
+    print(f"  {'Node':<22} {'Bat':>6} {'TxQ':>4} {'Full':>5} "
+          f"{'DupRate':>7} {'Uptime':>8} {'Penalty':>7}")
+    print(f"  {'─' * 62}")
+
+    for node in nodes_with_status:
+        s = node.status
+        bat = s.get('bat', 0)
+        tx_q = s.get('tx_queue_len', 0)
+        full = s.get('full_evts', 0)
+        recv_flood = s.get('recv_flood', 0)
+        flood_dups = s.get('flood_dups', 0)
+        dup_rate = flood_dups / recv_flood if recv_flood > 0 else 0
+        uptime_h = s.get('uptime', 0) / 3600
+        penalty = node.health_penalty
+
+        if penalty >= 4.0:
+            icon = c("!!", RED)
+        elif penalty > 0:
+            icon = c("! ", YELLOW)
+        else:
+            icon = c("OK", GREEN)
+
+        bat_str = f"{bat}mV"
+        if bat < 3300:
+            bat_str = c(bat_str, RED)
+        elif bat < 3500:
+            bat_str = c(bat_str, YELLOW)
+
+        print(f"  {icon} {node.name:<20} {bat_str:>6} {tx_q:>4} {full:>5} "
+              f"{dup_rate:>6.0%} {uptime_h:>7.1f}h "
+              f"{penalty:>+6.1f}dB")
+
+    print(f"\n  {len(nodes_with_status)} nodes with status data "
+          f"(out of {len(state.graph.nodes)} total)")
+
+    timestamps = [n.status_timestamp for n in nodes_with_status
+                  if n.status_timestamp]
+    if timestamps:
+        print(f"  Oldest status: {min(timestamps)}")
 
     pause()
 
@@ -768,7 +875,7 @@ def run_live_discovery(state: AppState):
           f"Save to: {state.config.discovery_save_file}")
 
     # Check for resumable state
-    sf = _state_file_for(state.config.discovery_save_file)
+    sf = state_file_for(state.config.discovery_save_file)
     if os.path.exists(sf):
         try:
             prev = DiscoveryState.load(sf)
@@ -828,7 +935,6 @@ def run_live_discovery(state: AppState):
 
     asyncio.run(_run())
     pause()
-
 
 
 def edit_discovery_params(state: AppState):
@@ -1306,7 +1412,8 @@ def quick_start(state: AppState):
             try:
                 state.graph = NetworkGraph.load(state.topology_file)
                 s = state.graph.stats()
-                print(f"  {c(f'Loaded: {s["nodes"]} nodes, {s["edges"]} edges', GREEN)}")
+                n_nodes, n_edges = s['nodes'], s['edges']
+                print(f"  {c(f'Loaded: {n_nodes} nodes, {n_edges} edges', GREEN)}")
 
                 # Resolve companion from loaded graph
                 if state.companion_prefix and state.companion_prefix not in state.graph.nodes:
