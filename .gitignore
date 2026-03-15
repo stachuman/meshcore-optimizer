@@ -1,0 +1,15 @@
+# Config with real credentials
+config.json
+passwords.json
+
+# Discovery state and topology data
+topology*.json
+*_discovery_state*.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+venv/

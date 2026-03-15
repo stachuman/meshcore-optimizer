@@ -1,0 +1,20 @@
+{
+  "radio": {
+    "protocol": "tcp",
+    "host": "192.168.1.100",
+    "port": 5000
+  },
+  "companion_prefix": "00000000",
+  "discovery": {
+    "max_rounds": 5,
+    "timeout": 30.0,
+    "delay": 5.0,
+    "infer_penalty": 5.0,
+    "save_file": "topology.json"
+  },
+  "passwords": [],
+  "default_guest_passwords": [
+    "",
+    "hello"
+  ]
+}
