@@ -289,6 +289,31 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
 
+    def _read_post_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            return json.loads(self.rfile.read(length))
+        return {}
+
+    def _load_config_dict(self):
+        """Load config file as raw dict, or return defaults."""
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {
+            "radio": {"protocol": "tcp", "host": "", "port": 5000},
+            "companion_prefix": "",
+            "discovery": {
+                "max_rounds": 5, "timeout": 30.0, "delay": 5.0,
+                "infer_penalty": 5.0, "save_file": "topology.json",
+            },
+            "passwords": [],
+            "default_guest_passwords": ["", "hello"],
+        }
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -306,6 +331,10 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             since = int(params.get("log_since", ["0"])[0])
             state["logs"] = _discovery.get_logs(since)
             self._send_json(state)
+        elif path == "/api/config":
+            cfg = self._load_config_dict()
+            cfg["config_exists"] = os.path.exists(self.config_file)
+            self._send_json(cfg)
         else:
             self.send_error(404)
 
@@ -322,8 +351,74 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/discovery/stop":
             ok, msg = _discovery.stop()
             self._send_json({"ok": ok, "message": msg})
+        elif path == "/api/config":
+            self._handle_save_config()
+        elif path == "/api/radio/test":
+            self._handle_radio_test()
         else:
             self.send_error(404)
+
+    def _handle_save_config(self):
+        body = self._read_post_body()
+        try:
+            with open(self.config_file, 'w') as f:
+                json.dump(body, f, indent=2)
+            # Update companion on the handler
+            MapHandler.companion_prefix = body.get("companion_prefix", "")
+            self._send_json({"ok": True})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, 500)
+
+    def _handle_radio_test(self):
+        """Test radio connection and return list of repeaters."""
+        body = self._read_post_body()
+        protocol = body.get("protocol", "tcp")
+        host = body.get("host", "")
+        port = body.get("port", 5000)
+
+        result = {"ok": False, "repeaters": [], "error": ""}
+
+        def _run():
+            from meshcore_discovery import RadioConfig, connect_radio
+            rc = RadioConfig(protocol=protocol, host=host, port=int(port))
+
+            async def _test():
+                mc = await connect_radio(rc)
+                try:
+                    await mc.ensure_contacts(follow=True)
+                    for pub_key, ct in mc.contacts.items():
+                        if not isinstance(ct, dict):
+                            continue
+                        if ct.get('type', 0) == 2:
+                            pfx = pub_key[:8].upper()
+                            name = ct.get('adv_name', '') or f"[{pfx}]"
+                            result["repeaters"].append({
+                                "prefix": pfx, "name": name,
+                            })
+                    result["ok"] = True
+                finally:
+                    await mc.disconnect()
+
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(
+                    asyncio.wait_for(_test(), timeout=15))
+            finally:
+                loop.close()
+
+        try:
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=20)
+            if t.is_alive():
+                result["error"] = "Connection timeout"
+            elif not result["ok"] and not result["error"]:
+                result["error"] = "Connection failed"
+        except Exception as e:
+            result["error"] = str(e)
+
+        result["repeaters"].sort(key=lambda r: r["name"])
+        self._send_json(result)
 
     def _handle_path(self, params):
         src = params.get("from", [""])[0]
@@ -493,6 +588,44 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
 .legend-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
 .legend-line { width: 24px; height: 3px; display: inline-block; border-radius: 1px; }
 .no-gps-badge { font-size: 10px; color: #ff9800; font-style: italic; }
+
+/* --- Settings Modal --- */
+.modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    z-index: 2000; align-items: center; justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+    background: #16213e; border: 1px solid #0f3460; border-radius: 10px;
+    width: 440px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
+    padding: 20px 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+.modal h2 { font-size: 18px; color: #00d4ff; margin-bottom: 16px; }
+.modal h4 { font-size: 13px; color: #00d4ff; margin: 14px 0 6px;
+            text-transform: uppercase; letter-spacing: 0.5px; }
+.modal label.field { display: block; font-size: 12px; color: #8899aa;
+                     margin-bottom: 2px; margin-top: 8px; }
+.modal input, .modal select {
+    width: 100%; padding: 7px 10px; border-radius: 4px;
+    background: #0d1b2a; border: 1px solid #1a5276; color: #e0e0e0;
+    font-size: 13px;
+}
+.modal input:focus, .modal select:focus { border-color: #00d4ff; outline: none; }
+.modal .row { display: flex; gap: 10px; }
+.modal .row > * { flex: 1; }
+.modal .actions { display: flex; gap: 8px; margin-top: 18px; justify-content: flex-end; }
+.modal .repeater-list {
+    max-height: 160px; overflow-y: auto; margin-top: 6px;
+    border: 1px solid #1a5276; border-radius: 4px; background: #0d1b2a;
+}
+.modal .repeater-item {
+    padding: 6px 10px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid #0f3460;
+}
+.modal .repeater-item:hover { background: #1a5276; }
+.modal .repeater-item.selected { background: #0f3460; color: #00d4ff; }
+.modal .hint { font-size: 11px; color: #666; margin-top: 4px; }
+.modal .test-status { font-size: 12px; margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -503,11 +636,82 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
     <div class="controls">
         <label><input type="checkbox" id="chkAutoRefresh" checked> Auto-refresh</label>
         <button onclick="refreshTopology()">Refresh</button>
+        <button onclick="openSettings()">Settings</button>
         <button id="btnPanel" onclick="togglePanel()" class="active">Panel</button>
     </div>
 </div>
 
 <div id="map"></div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settingsModal">
+<div class="modal">
+    <h2 id="settingsTitle">Settings</h2>
+
+    <h4>Radio Connection</h4>
+    <label class="field">Protocol</label>
+    <select id="cfgProtocol">
+        <option value="tcp">TCP</option>
+        <option value="serial">Serial</option>
+        <option value="ble">BLE</option>
+    </select>
+    <div class="row">
+        <div>
+            <label class="field">Host / Port</label>
+            <input id="cfgHost" placeholder="192.168.1.100">
+        </div>
+        <div style="max-width:100px">
+            <label class="field">&nbsp;</label>
+            <input id="cfgPort" type="number" value="5000" placeholder="5000">
+        </div>
+    </div>
+    <div style="margin-top:8px">
+        <button onclick="testRadio()" id="btnTestRadio">Test Connection</button>
+        <span class="test-status" id="testStatus"></span>
+    </div>
+
+    <h4>Home Repeater</h4>
+    <div class="hint">Click "Test Connection" to detect repeaters, or enter prefix manually.</div>
+    <div class="repeater-list" id="repeaterList" style="display:none"></div>
+    <label class="field">Companion Prefix</label>
+    <input id="cfgCompanion" placeholder="e.g. 53649FDE" style="text-transform:uppercase">
+
+    <h4>Discovery</h4>
+    <div class="row">
+        <div>
+            <label class="field">Max Rounds</label>
+            <input id="cfgMaxRounds" type="number" value="5">
+        </div>
+        <div>
+            <label class="field">Timeout (s)</label>
+            <input id="cfgTimeout" type="number" value="30" step="1">
+        </div>
+    </div>
+    <div class="row">
+        <div>
+            <label class="field">Delay (s)</label>
+            <input id="cfgDelay" type="number" value="5" step="0.5">
+        </div>
+        <div>
+            <label class="field">Infer Penalty (dB)</label>
+            <input id="cfgInferPenalty" type="number" value="5" step="0.5">
+        </div>
+    </div>
+
+    <div class="row">
+        <div>
+            <label class="field">Default Guest Passwords</label>
+            <input id="cfgGuestPws" placeholder="blank, hello" value="">
+            <div class="hint">Comma-separated. Use "blank" for empty password.</div>
+        </div>
+    </div>
+
+    <div class="actions">
+        <button onclick="closeSettings()">Cancel</button>
+        <button class="success" onclick="saveSettings()">Save</button>
+    </div>
+</div>
+</div>
 
 <!-- Side Panel -->
 <div id="panel">
@@ -1064,6 +1268,160 @@ function toggleAutoRefresh() {
 }
 document.getElementById('chkAutoRefresh').addEventListener('change', toggleAutoRefresh);
 
+// --- Settings ---
+async function openSettings() {
+    try {
+        const resp = await fetch('/api/config');
+        const cfg = await resp.json();
+        populateSettingsForm(cfg);
+        document.getElementById('settingsModal').classList.add('open');
+        // If no config exists, change title to setup wizard
+        if (!cfg.config_exists) {
+            document.getElementById('settingsTitle').textContent = 'Initial Setup';
+        } else {
+            document.getElementById('settingsTitle').textContent = 'Settings';
+        }
+    } catch (e) {
+        alert('Failed to load config: ' + e);
+    }
+}
+
+function closeSettings() {
+    document.getElementById('settingsModal').classList.remove('open');
+}
+
+function populateSettingsForm(cfg) {
+    const radio = cfg.radio || {};
+    document.getElementById('cfgProtocol').value = radio.protocol || 'tcp';
+    document.getElementById('cfgHost').value = radio.host || '';
+    document.getElementById('cfgPort').value = radio.port || 5000;
+    document.getElementById('cfgCompanion').value = cfg.companion_prefix || '';
+    const disc = cfg.discovery || {};
+    document.getElementById('cfgMaxRounds').value = disc.max_rounds || 5;
+    document.getElementById('cfgTimeout').value = disc.timeout || 30;
+    document.getElementById('cfgDelay').value = disc.delay || 5;
+    document.getElementById('cfgInferPenalty').value = disc.infer_penalty || 5;
+    // Guest passwords: convert ["", "hello"] to "blank, hello"
+    const pws = cfg.default_guest_passwords || ['', 'hello'];
+    document.getElementById('cfgGuestPws').value =
+        pws.map(p => p === '' ? 'blank' : p).join(', ');
+    // Clear old test results
+    document.getElementById('testStatus').textContent = '';
+    document.getElementById('repeaterList').style.display = 'none';
+}
+
+function buildConfigFromForm() {
+    const pwsRaw = document.getElementById('cfgGuestPws').value;
+    const pws = pwsRaw.split(',').map(p => {
+        p = p.trim();
+        return p.toLowerCase() === 'blank' ? '' : p;
+    }).filter(p => p !== undefined);
+
+    return {
+        radio: {
+            protocol: document.getElementById('cfgProtocol').value,
+            host: document.getElementById('cfgHost').value.trim(),
+            port: parseInt(document.getElementById('cfgPort').value) || 5000,
+        },
+        companion_prefix: document.getElementById('cfgCompanion').value.trim().toUpperCase(),
+        discovery: {
+            max_rounds: parseInt(document.getElementById('cfgMaxRounds').value) || 5,
+            timeout: parseFloat(document.getElementById('cfgTimeout').value) || 30,
+            delay: parseFloat(document.getElementById('cfgDelay').value) || 5,
+            infer_penalty: parseFloat(document.getElementById('cfgInferPenalty').value) || 5,
+            save_file: 'topology.json',
+        },
+        passwords: [],
+        default_guest_passwords: pws,
+    };
+}
+
+async function saveSettings() {
+    const cfg = buildConfigFromForm();
+    if (!cfg.companion_prefix) {
+        alert('Please set a companion prefix (home repeater).');
+        return;
+    }
+    if (!cfg.radio.host && cfg.radio.protocol === 'tcp') {
+        alert('Please enter a radio host address.');
+        return;
+    }
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(cfg),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            companionPrefix = cfg.companion_prefix;
+            closeSettings();
+            refreshTopology();
+        } else {
+            alert('Save failed: ' + (data.error || 'unknown'));
+        }
+    } catch (e) { alert('Save failed: ' + e); }
+}
+
+async function testRadio() {
+    const btn = document.getElementById('btnTestRadio');
+    const status = document.getElementById('testStatus');
+    btn.disabled = true;
+    status.textContent = 'Connecting...';
+    status.style.color = '#ff9800';
+
+    const body = {
+        protocol: document.getElementById('cfgProtocol').value,
+        host: document.getElementById('cfgHost').value.trim(),
+        port: parseInt(document.getElementById('cfgPort').value) || 5000,
+    };
+
+    try {
+        const resp = await fetch('/api/radio/test', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            status.textContent = `Connected! ${data.repeaters.length} repeaters found.`;
+            status.style.color = '#4caf50';
+            showRepeaterList(data.repeaters);
+        } else {
+            status.textContent = data.error || 'Connection failed';
+            status.style.color = '#f44336';
+        }
+    } catch (e) {
+        status.textContent = 'Request failed';
+        status.style.color = '#f44336';
+    }
+    btn.disabled = false;
+}
+
+function showRepeaterList(repeaters) {
+    const list = document.getElementById('repeaterList');
+    if (!repeaters.length) { list.style.display = 'none'; return; }
+    list.style.display = 'block';
+    list.innerHTML = '';
+    const curCompanion = document.getElementById('cfgCompanion').value.toUpperCase();
+    for (const r of repeaters) {
+        const item = document.createElement('div');
+        item.className = 'repeater-item' + (r.prefix === curCompanion ? ' selected' : '');
+        item.textContent = `${r.name}  [${r.prefix}]`;
+        item.onclick = function() {
+            document.getElementById('cfgCompanion').value = r.prefix;
+            list.querySelectorAll('.repeater-item').forEach(i => i.classList.remove('selected'));
+            item.classList.add('selected');
+        };
+        list.appendChild(item);
+    }
+}
+
+// Close modal on overlay click
+document.getElementById('settingsModal').addEventListener('click', function(e) {
+    if (e.target === this) closeSettings();
+});
+
 // --- Init ---
 refreshTopology();
 toggleAutoRefresh();
@@ -1071,6 +1429,10 @@ toggleAutoRefresh();
 fetch('/api/discovery/status').then(r => r.json()).then(d => {
     updateDiscUI(d);
     if (d.status === 'running' || d.status === 'stopping') startDiscPoll();
+}).catch(() => {});
+// Auto-open setup wizard if no config
+fetch('/api/config').then(r => r.json()).then(cfg => {
+    if (!cfg.config_exists) openSettings();
 }).catch(() => {});
 </script>
 </body>

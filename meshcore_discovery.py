@@ -1162,10 +1162,19 @@ async def progressive_discovery(mc, graph: NetworkGraph,
     if os.path.exists(state_file):
         try:
             prev = DiscoveryState.load(state_file)
+            # Only resume if companion matches, not completed, AND the
+            # graph actually has nodes from the saved state (guards
+            # against stale state file after topology was deleted).
+            graph_has_data = len(graph.nodes) > 1
             if (prev.companion_prefix == companion_prefix
-                    and not prev.completed):
+                    and not prev.completed
+                    and graph_has_data):
                 ds = prev
                 resumed = True
+            elif not graph_has_data and prev.traced_set:
+                print(f"  Stale state file (graph empty) — "
+                      f"starting fresh")
+                os.remove(state_file)
         except Exception:
             pass
 

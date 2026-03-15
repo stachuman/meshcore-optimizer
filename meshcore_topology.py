@@ -800,10 +800,10 @@ def print_topology_report(graph: NetworkGraph):
     """Print a topology overview."""
     stats = graph.stats()
 
-    print("\n" + "=" * 72)
+    print("\n" + "=" * 40)
     print("  MESHCORE NETWORK TOPOLOGY")
     print(f"  Generated: {datetime.now().isoformat(timespec='seconds')}")
-    print("=" * 72)
+    print("=" * 40)
 
     print(f"\n  Nodes: {stats['nodes']}  |  "
           f"Edges: {stats['edges']}  |  "
@@ -817,7 +817,7 @@ def print_topology_report(graph: NetworkGraph):
 
     # Adjacency list
     print(f"\n  ADJACENCY LIST (who hears whom)")
-    print("  " + "-" * 68)
+    print("  " + "-" * 36)
     for prefix, node in sorted(graph.nodes.items(), key=lambda x: x[1].name):
         outgoing = graph.edges.get(prefix, [])
 
@@ -874,7 +874,7 @@ def print_all_pairs_report(results: dict, graph: NetworkGraph):
     prefixes = sorted(graph.nodes.keys(), key=lambda p: graph.nodes[p].name)
 
     print(f"\n  ALL-PAIRS BOTTLENECK SNR MATRIX")
-    print("  " + "-" * 68)
+    print("  " + "-" * 36)
 
     # Header
     names = [graph.nodes[p].name[:8] for p in prefixes]
