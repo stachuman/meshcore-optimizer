@@ -146,6 +146,7 @@ class Config:
     discovery_delay: float = 5.0
     discovery_infer_penalty: float = 5.0
     discovery_save_file: str = "topology.json"
+    discovery_hop_penalty: float = 1.0
     passwords: list = None
     default_guest_passwords: list = None
     health_penalties: dict = None
@@ -199,6 +200,7 @@ def load_config(filename: str) -> Config:
         discovery_delay=disc.get("delay", 5.0),
         discovery_infer_penalty=disc.get("infer_penalty", 5.0),
         discovery_save_file=disc.get("save_file", "topology.json"),
+        discovery_hop_penalty=disc.get("hop_penalty", 1.0),
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
                                          DEFAULT_GUEST_PASSWORDS),

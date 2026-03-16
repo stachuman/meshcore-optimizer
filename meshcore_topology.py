@@ -630,7 +630,8 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                 min_snr_threshold: float = -15.0,
                 excluded_intermediates: set = None,
                 excluded_edges: set = None,
-                use_node_health: bool = False) -> PathResult:
+                use_node_health: bool = False,
+                hop_penalty: float = 0.0) -> PathResult:
     """
     Find the path with maximum bottleneck SNR (widest path).
 
@@ -650,6 +651,7 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                                 (source and dest are never excluded)
         excluded_edges: set of (from_prefix, to_prefix) tuples to skip
         use_node_health: apply health penalty for unhealthy intermediates
+        hop_penalty: dB penalty per hop (reduces score for longer paths)
 
     Returns:
         PathResult with the optimal path
@@ -719,7 +721,8 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                 continue
 
             # The bottleneck through u→v is min(bottleneck to u, effective SNR)
-            candidate = min(bottleneck_u, effective_snr)
+            # Then subtract hop penalty to prefer shorter paths
+            candidate = min(bottleneck_u, effective_snr) - hop_penalty
             new_hops = hops[u] + 1
 
             # Update if: wider bottleneck, or same bottleneck + fewer hops
@@ -766,7 +769,8 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
 def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
                              dest_prefix: str, k: int = 3,
                              min_snr_threshold: float = -15.0,
-                             use_node_health: bool = False
+                             use_node_health: bool = False,
+                             hop_penalty: float = 0.0
                              ) -> list[PathResult]:
     """
     Find up to k alternative paths, each avoiding intermediates of
@@ -783,7 +787,8 @@ def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
                          min_snr_threshold=min_snr_threshold,
                          excluded_intermediates=excluded,
                          excluded_edges=blocked_edges,
-                         use_node_health=use_node_health)
+                         use_node_health=use_node_health,
+                         hop_penalty=hop_penalty)
         if not pr.found:
             break
         path_key = tuple(pr.path)

@@ -662,12 +662,15 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             self._send_json({"error": "node not found"}, 404)
             return
 
+        cfg = self._load_config_dict()
+        hp = cfg.get("discovery", {}).get("hop_penalty", 1.0)
+
         fwd = widest_path_alternatives(
             graph, src_node.prefix, dst_node.prefix,
-            k=k, use_node_health=use_health)
+            k=k, use_node_health=use_health, hop_penalty=hp)
         rev = widest_path_alternatives(
             graph, dst_node.prefix, src_node.prefix,
-            k=k, use_node_health=use_health)
+            k=k, use_node_health=use_health, hop_penalty=hp)
 
         def _pr(pr):
             return {
