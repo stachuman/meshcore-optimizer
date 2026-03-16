@@ -849,11 +849,22 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
     width: 440px; max-width: 95vw; max-height: 90vh; overflow-y: auto;
     padding: 20px 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
 }
-.modal h2 { font-size: 18px; color: #00d4ff; margin-bottom: 16px; }
+.modal h2 { font-size: 18px; color: #00d4ff; margin-bottom: 12px; }
 .modal h4 { font-size: 13px; color: #00d4ff; margin: 14px 0 6px;
             text-transform: uppercase; letter-spacing: 0.5px; }
 .modal label.field { display: block; font-size: 12px; color: #8899aa;
                      margin-bottom: 2px; margin-top: 8px; }
+.tab-bar {
+    display: flex; border-bottom: 1px solid #0f3460; margin-bottom: 12px;
+}
+.tab-btn {
+    padding: 6px 14px; cursor: pointer; font-size: 13px; color: #8899aa;
+    border: none; background: none; border-bottom: 2px solid transparent;
+}
+.tab-btn:hover { color: #e0e0e0; }
+.tab-btn.active { color: #00d4ff; border-bottom-color: #00d4ff; }
+.tab-page { display: none; }
+.tab-page.active { display: block; }
 .modal input, .modal select {
     width: 100%; padding: 7px 10px; border-radius: 4px;
     background: #0d1b2a; border: 1px solid #1a5276; color: #e0e0e0;
@@ -902,79 +913,157 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
 <div class="modal-overlay" id="settingsModal">
 <div class="modal">
     <h2 id="settingsTitle">Settings</h2>
-
-    <h4>Radio Connection</h4>
-    <label class="field">Protocol</label>
-    <select id="cfgProtocol" onchange="updateProtocolFields()">
-        <option value="tcp">TCP</option>
-        <option value="serial">Serial / USB</option>
-        <option value="ble">BLE</option>
-    </select>
-    <div class="row" id="rowTcp">
-        <div>
-            <label class="field">Host / Port</label>
-            <input id="cfgHost" placeholder="192.168.1.100">
-        </div>
-        <div style="max-width:100px">
-            <label class="field">&nbsp;</label>
-            <input id="cfgPort" type="number" value="5000" placeholder="5000">
-        </div>
+    <div class="tab-bar">
+        <span class="tab-btn active" onclick="switchTab('tabRadio',this)">Radio</span>
+        <span class="tab-btn" onclick="switchTab('tabDiscovery',this)">Discovery</span>
+        <span class="tab-btn" onclick="switchTab('tabHealth',this)">Health</span>
+        <span class="tab-btn" onclick="switchTab('tabPasswords',this)">Passwords</span>
     </div>
-    <div id="rowSerial" style="display:none">
+
+    <!-- Tab: Radio -->
+    <div id="tabRadio" class="tab-page active">
+        <label class="field">Protocol</label>
+        <select id="cfgProtocol" onchange="updateProtocolFields()">
+            <option value="tcp">TCP</option>
+            <option value="serial">Serial / USB</option>
+            <option value="ble">BLE</option>
+        </select>
+        <div class="row" id="rowTcp">
+            <div>
+                <label class="field">Host</label>
+                <input id="cfgHost" placeholder="192.168.1.100">
+            </div>
+            <div style="max-width:100px">
+                <label class="field">Port</label>
+                <input id="cfgPort" type="number" value="5000">
+            </div>
+        </div>
+        <div id="rowSerial" style="display:none">
+            <div class="row">
+                <div>
+                    <label class="field">Serial Port</label>
+                    <input id="cfgSerialPort" placeholder="/dev/ttyACM0">
+                </div>
+                <div style="max-width:120px">
+                    <label class="field">Baud Rate</label>
+                    <input id="cfgBaudrate" type="number" value="115200">
+                </div>
+            </div>
+        </div>
+        <div id="rowBle" style="display:none">
+            <label class="field">BLE Address (optional)</label>
+            <input id="cfgBleAddress" placeholder="AA:BB:CC:DD:EE:FF">
+        </div>
+        <div style="margin-top:8px">
+            <button onclick="testRadio()" id="btnTestRadio">Test Connection</button>
+            <span class="test-status" id="testStatus"></span>
+        </div>
+
+        <h4>Home Repeater</h4>
+        <div class="hint">Click "Test Connection" to detect repeaters, or enter prefix manually.</div>
+        <div class="repeater-list" id="repeaterList" style="display:none"></div>
+        <label class="field">Companion Prefix</label>
+        <input id="cfgCompanion" placeholder="e.g. 53649FDE" style="text-transform:uppercase">
+    </div>
+
+    <!-- Tab: Discovery -->
+    <div id="tabDiscovery" class="tab-page">
         <div class="row">
             <div>
-                <label class="field">Serial Port</label>
-                <input id="cfgSerialPort" placeholder="/dev/ttyACM0">
+                <label class="field">Max Rounds</label>
+                <input id="cfgMaxRounds" type="number" value="5">
             </div>
-            <div style="max-width:120px">
-                <label class="field">Baud Rate</label>
-                <input id="cfgBaudrate" type="number" value="115200">
+            <div>
+                <label class="field">Timeout (s)</label>
+                <input id="cfgTimeout" type="number" value="30" step="1">
+            </div>
+        </div>
+        <div class="row">
+            <div>
+                <label class="field">Delay (s)</label>
+                <input id="cfgDelay" type="number" value="5" step="0.5">
+            </div>
+            <div>
+                <label class="field">Infer Penalty (dB)</label>
+                <input id="cfgInferPenalty" type="number" value="5" step="0.5">
+            </div>
+        </div>
+        <div class="row">
+            <div>
+                <label class="field">Hop Penalty (dB/hop)</label>
+                <input id="cfgHopPenalty" type="number" value="1.0" step="0.5">
+                <div class="hint">Extra cost per hop. Higher = prefer shorter paths.</div>
+            </div>
+            <div>
+                <label class="field">Save File</label>
+                <input id="cfgSaveFile" value="topology.json">
             </div>
         </div>
     </div>
-    <div id="rowBle" style="display:none">
-        <label class="field">BLE Address (optional)</label>
-        <input id="cfgBleAddress" placeholder="AA:BB:CC:DD:EE:FF">
-    </div>
-    <div style="margin-top:8px">
-        <button onclick="testRadio()" id="btnTestRadio">Test Connection</button>
-        <span class="test-status" id="testStatus"></span>
+
+    <!-- Tab: Health Penalties -->
+    <div id="tabHealth" class="tab-page">
+        <div class="hint" style="margin-bottom:8px">
+            Penalty in dB subtracted from effective SNR when routing through unhealthy nodes.
+            Set to 0 to disable a factor.
+        </div>
+        <h4>Battery</h4>
+        <div class="row">
+            <div>
+                <label class="field">Critical (&lt;3300mV)</label>
+                <input id="cfgHpBatCrit" type="number" value="3.0" step="0.5">
+            </div>
+            <div>
+                <label class="field">Warning (&lt;3500mV)</label>
+                <input id="cfgHpBatWarn" type="number" value="1.0" step="0.5">
+            </div>
+        </div>
+        <h4>TX Queue</h4>
+        <div class="row">
+            <div>
+                <label class="field">High (&gt;5)</label>
+                <input id="cfgHpTxqHigh" type="number" value="4.0" step="0.5">
+            </div>
+            <div>
+                <label class="field">Low (&gt;0)</label>
+                <input id="cfgHpTxqLow" type="number" value="1.0" step="0.5">
+            </div>
+        </div>
+        <h4>Event Overflows</h4>
+        <div class="row">
+            <div>
+                <label class="field">High (&gt;10)</label>
+                <input id="cfgHpEvtHigh" type="number" value="4.0" step="0.5">
+            </div>
+            <div>
+                <label class="field">Per event (1-10)</label>
+                <input id="cfgHpEvtPer" type="number" value="0.5" step="0.1">
+            </div>
+        </div>
+        <h4>Flood Duplicates</h4>
+        <div class="row">
+            <div>
+                <label class="field">High (&gt;70%)</label>
+                <input id="cfgHpFloodHigh" type="number" value="3.0" step="0.5">
+            </div>
+            <div>
+                <label class="field">Medium (&gt;50%)</label>
+                <input id="cfgHpFloodMed" type="number" value="1.0" step="0.5">
+            </div>
+        </div>
     </div>
 
-    <h4>Home Repeater</h4>
-    <div class="hint">Click "Test Connection" to detect repeaters, or enter prefix manually.</div>
-    <div class="repeater-list" id="repeaterList" style="display:none"></div>
-    <label class="field">Companion Prefix</label>
-    <input id="cfgCompanion" placeholder="e.g. 53649FDE" style="text-transform:uppercase">
+    <!-- Tab: Passwords -->
+    <div id="tabPasswords" class="tab-page">
+        <label class="field">Default Guest Passwords</label>
+        <input id="cfgGuestPws" placeholder="blank, hello" value="">
+        <div class="hint">Comma-separated. Use "blank" for empty password. Tried on every repeater.</div>
 
-    <h4>Discovery</h4>
-    <div class="row">
-        <div>
-            <label class="field">Max Rounds</label>
-            <input id="cfgMaxRounds" type="number" value="5">
-        </div>
-        <div>
-            <label class="field">Timeout (s)</label>
-            <input id="cfgTimeout" type="number" value="30" step="1">
-        </div>
-    </div>
-    <div class="row">
-        <div>
-            <label class="field">Delay (s)</label>
-            <input id="cfgDelay" type="number" value="5" step="0.5">
-        </div>
-        <div>
-            <label class="field">Infer Penalty (dB)</label>
-            <input id="cfgInferPenalty" type="number" value="5" step="0.5">
-        </div>
-    </div>
-
-    <div class="row">
-        <div>
-            <label class="field">Default Guest Passwords</label>
-            <input id="cfgGuestPws" placeholder="blank, hello" value="">
-            <div class="hint">Comma-separated. Use "blank" for empty password.</div>
-        </div>
+        <h4>Per-Repeater Passwords</h4>
+        <div class="hint">One per line: prefix level password (e.g. "53649FDE admin secret")</div>
+        <textarea id="cfgPasswords" rows="4" style="width:100%;padding:7px 10px;border-radius:4px;
+            background:#0d1b2a;border:1px solid #1a5276;color:#e0e0e0;font-size:13px;
+            font-family:monospace;resize:vertical"></textarea>
     </div>
 
     <div class="actions">
@@ -1651,6 +1740,13 @@ function toggleAutoRefresh() {
 document.getElementById('chkAutoRefresh').addEventListener('change', toggleAutoRefresh);
 
 // --- Settings ---
+function switchTab(tabId, btn) {
+    document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(tabId).classList.add('active');
+    btn.classList.add('active');
+}
+
 async function openSettings() {
     try {
         const resp = await fetch('/api/config');
@@ -1680,6 +1776,7 @@ function updateProtocolFields() {
 }
 
 function populateSettingsForm(cfg) {
+    // Radio
     const radio = cfg.radio || {};
     document.getElementById('cfgProtocol').value = radio.protocol || 'tcp';
     document.getElementById('cfgHost').value = radio.host || '';
@@ -1689,46 +1786,102 @@ function populateSettingsForm(cfg) {
     document.getElementById('cfgBleAddress').value = radio.ble_address || '';
     updateProtocolFields();
     document.getElementById('cfgCompanion').value = cfg.companion_prefix || '';
+    document.getElementById('testStatus').textContent = '';
+    document.getElementById('repeaterList').style.display = 'none';
+
+    // Discovery
     const disc = cfg.discovery || {};
     document.getElementById('cfgMaxRounds').value = disc.max_rounds || 5;
     document.getElementById('cfgTimeout').value = disc.timeout || 30;
     document.getElementById('cfgDelay').value = disc.delay || 5;
     document.getElementById('cfgInferPenalty').value = disc.infer_penalty || 5;
-    // Guest passwords: convert ["", "hello"] to "blank, hello"
+    document.getElementById('cfgHopPenalty').value = disc.hop_penalty ?? 1.0;
+    document.getElementById('cfgSaveFile').value = disc.save_file || 'topology.json';
+
+    // Health penalties
+    const hp = cfg.health_penalties || {};
+    document.getElementById('cfgHpBatCrit').value = hp.battery_critical ?? 3.0;
+    document.getElementById('cfgHpBatWarn').value = hp.battery_warning ?? 1.0;
+    document.getElementById('cfgHpTxqHigh').value = hp.txqueue_high ?? 4.0;
+    document.getElementById('cfgHpTxqLow').value = hp.txqueue_low ?? 1.0;
+    document.getElementById('cfgHpEvtHigh').value = hp.full_evts_high ?? 4.0;
+    document.getElementById('cfgHpEvtPer').value = hp.full_evts_per ?? 0.5;
+    document.getElementById('cfgHpFloodHigh').value = hp.flood_dup_high ?? 3.0;
+    document.getElementById('cfgHpFloodMed').value = hp.flood_dup_medium ?? 1.0;
+
+    // Passwords
     const pws = cfg.default_guest_passwords || ['', 'hello'];
     document.getElementById('cfgGuestPws').value =
         pws.map(p => p === '' ? 'blank' : p).join(', ');
-    // Clear old test results
-    document.getElementById('testStatus').textContent = '';
-    document.getElementById('repeaterList').style.display = 'none';
+    // Per-repeater passwords
+    const pwLines = (cfg.passwords || []).map(p =>
+        `${p.prefix || p.name || '?'} ${p.level} ${p.password}`
+    ).join('\n');
+    document.getElementById('cfgPasswords').value = pwLines;
+
+    // Reset to first tab
+    switchTab('tabRadio', document.querySelector('.tab-btn'));
 }
 
 function buildConfigFromForm() {
+    // Guest passwords
     const pwsRaw = document.getElementById('cfgGuestPws').value;
-    const pws = pwsRaw.split(',').map(p => {
+    const guestPws = pwsRaw.split(',').map(p => {
         p = p.trim();
         return p.toLowerCase() === 'blank' ? '' : p;
     }).filter(p => p !== undefined);
 
+    // Per-repeater passwords
+    const pwLines = document.getElementById('cfgPasswords').value.trim();
+    const passwords = [];
+    if (pwLines) {
+        for (const line of pwLines.split('\n')) {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length >= 2) {
+                passwords.push({
+                    prefix: parts[0].toUpperCase(),
+                    level: parts[1] || 'guest',
+                    password: parts.slice(2).join(' '),
+                    name: '',
+                });
+            }
+        }
+    }
+
+    const v = id => document.getElementById(id).value;
+    const f = id => parseFloat(v(id));
+    const i = id => parseInt(v(id));
+
     return {
         radio: {
-            protocol: document.getElementById('cfgProtocol').value,
-            host: document.getElementById('cfgHost').value.trim(),
-            port: parseInt(document.getElementById('cfgPort').value) || 5000,
-            serial_port: document.getElementById('cfgSerialPort').value.trim(),
-            baudrate: parseInt(document.getElementById('cfgBaudrate').value) || 115200,
-            ble_address: document.getElementById('cfgBleAddress').value.trim(),
+            protocol: v('cfgProtocol'),
+            host: v('cfgHost').trim(),
+            port: i('cfgPort') || 5000,
+            serial_port: v('cfgSerialPort').trim(),
+            baudrate: i('cfgBaudrate') || 115200,
+            ble_address: v('cfgBleAddress').trim(),
         },
-        companion_prefix: document.getElementById('cfgCompanion').value.trim().toUpperCase(),
+        companion_prefix: v('cfgCompanion').trim().toUpperCase(),
         discovery: {
-            max_rounds: parseInt(document.getElementById('cfgMaxRounds').value) || 5,
-            timeout: parseFloat(document.getElementById('cfgTimeout').value) || 30,
-            delay: parseFloat(document.getElementById('cfgDelay').value) || 5,
-            infer_penalty: parseFloat(document.getElementById('cfgInferPenalty').value) || 5,
-            save_file: 'topology.json',
+            max_rounds: i('cfgMaxRounds') || 5,
+            timeout: f('cfgTimeout') || 30,
+            delay: f('cfgDelay') || 5,
+            infer_penalty: f('cfgInferPenalty') || 5,
+            hop_penalty: f('cfgHopPenalty') ?? 1.0,
+            save_file: v('cfgSaveFile') || 'topology.json',
         },
-        passwords: [],
-        default_guest_passwords: pws,
+        passwords: passwords,
+        default_guest_passwords: guestPws,
+        health_penalties: {
+            battery_critical: f('cfgHpBatCrit') ?? 3.0,
+            battery_warning: f('cfgHpBatWarn') ?? 1.0,
+            txqueue_high: f('cfgHpTxqHigh') ?? 4.0,
+            txqueue_low: f('cfgHpTxqLow') ?? 1.0,
+            full_evts_high: f('cfgHpEvtHigh') ?? 4.0,
+            full_evts_per: f('cfgHpEvtPer') ?? 0.5,
+            flood_dup_high: f('cfgHpFloodHigh') ?? 3.0,
+            flood_dup_medium: f('cfgHpFloodMed') ?? 1.0,
+        },
     };
 }
 
