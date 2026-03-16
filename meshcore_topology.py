@@ -705,12 +705,23 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                     and v in excluded_intermediates):
                 continue
 
-            # Bidirectional: use the weaker direction since the path
-            # is physically the same route for both send and return
+            # Bidirectional: account for both directions since the path
+            # is physically the same route for both send and return.
+            # When one direction is inferred (guessed), use the measured
+            # value with a small penalty instead of min(measured, inferred)
+            # which would double-penalize.
             reverse_edge = graph.get_edge(v, u)
-            effective_snr = min(edge.snr_db,
-                                reverse_edge.snr_db if reverse_edge
-                                else edge.snr_db)
+            if not reverse_edge:
+                effective_snr = edge.snr_db
+            elif edge.source == "inferred" and reverse_edge.source != "inferred":
+                # Forward is inferred, reverse is measured — trust measured
+                effective_snr = reverse_edge.snr_db - 2.0
+            elif reverse_edge.source == "inferred" and edge.source != "inferred":
+                # Reverse is inferred, forward is measured — trust measured
+                effective_snr = edge.snr_db - 2.0
+            else:
+                # Both measured or both inferred — use weaker
+                effective_snr = min(edge.snr_db, reverse_edge.snr_db)
 
             # Apply node health penalty for intermediate nodes
             if use_node_health and v != dest and v in graph.nodes:
