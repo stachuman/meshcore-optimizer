@@ -814,6 +814,27 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
 .legend-line { width: 24px; height: 3px; display: inline-block; border-radius: 1px; }
 .no-gps-badge { font-size: 10px; color: #ff9800; font-style: italic; }
 
+/* --- Search --- */
+.search-wrap { position: relative; }
+.search-wrap input {
+    width: 160px; padding: 4px 8px; border-radius: 4px; font-size: 13px;
+    background: #0d1b2a; border: 1px solid #1a5276; color: #e0e0e0;
+}
+.search-wrap input:focus { border-color: #00d4ff; outline: none; }
+.search-results {
+    display: none; position: absolute; top: 100%; left: 0; width: 240px;
+    max-height: 200px; overflow-y: auto; background: #16213e;
+    border: 1px solid #0f3460; border-radius: 0 0 6px 6px;
+    z-index: 1100; margin-top: 2px;
+}
+.search-results.open { display: block; }
+.search-item {
+    padding: 6px 10px; cursor: pointer; font-size: 13px;
+    border-bottom: 1px solid #0f3460;
+}
+.search-item:hover { background: #1a5276; }
+.search-item small { color: #666; }
+
 /* --- Settings Modal --- */
 .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
@@ -859,6 +880,12 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
     <h1>MeshCore Network Map</h1>
     <span class="stats" id="stats"></span>
     <div class="controls">
+        <div class="search-wrap">
+            <input id="searchInput" type="text" placeholder="Find repeater..."
+                   autocomplete="off" oninput="onSearch(this.value)"
+                   onfocus="onSearch(this.value)">
+            <div id="searchResults" class="search-results"></div>
+        </div>
         <label><input type="checkbox" id="chkAutoRefresh" checked> Auto-refresh</label>
         <button onclick="refreshTopology()">Refresh</button>
         <button onclick="openSettings()">Settings</button>
@@ -1022,6 +1049,48 @@ legend.onAdd = function() {
     return div;
 };
 legend.addTo(map);
+
+// --- Search ---
+function onSearch(query) {
+    const results = document.getElementById('searchResults');
+    if (!topo || !query || query.length < 1) {
+        results.classList.remove('open');
+        return;
+    }
+    const q = query.toLowerCase();
+    const matches = Object.entries(topo.nodes)
+        .filter(([pfx, n]) => n.name.toLowerCase().includes(q) || pfx.toLowerCase().includes(q))
+        .sort((a, b) => a[1].name.localeCompare(b[1].name))
+        .slice(0, 10);
+
+    if (!matches.length) { results.classList.remove('open'); return; }
+
+    results.innerHTML = '';
+    for (const [pfx, n] of matches) {
+        const item = document.createElement('div');
+        item.className = 'search-item';
+        item.innerHTML = `${escHtml(n.name)} <small>[${pfx.substring(0,4)}]</small>`;
+        item.onclick = () => goToNode(pfx);
+        results.appendChild(item);
+    }
+    results.classList.add('open');
+}
+
+function goToNode(pfx) {
+    document.getElementById('searchResults').classList.remove('open');
+    document.getElementById('searchInput').value = '';
+    const node = topo.nodes[pfx];
+    if (!node) return;
+    map.flyTo([node._lat, node._lon], 14, { duration: 0.8 });
+    const m = markers[pfx];
+    if (m) setTimeout(() => m.openPopup(), 500);
+}
+
+// Close search on click outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.search-wrap'))
+        document.getElementById('searchResults').classList.remove('open');
+});
 
 // --- Panel toggle ---
 function togglePanel() {
