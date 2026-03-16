@@ -306,6 +306,137 @@ def state_file_for(save_file: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Shared radio helpers — used by discovery, web UI, and node commands
+# ---------------------------------------------------------------------------
+
+PATH_HASH_MODE = 1
+HOP_HEX_LEN = 4  # (PATH_HASH_MODE + 1) * 2
+
+
+def find_contact(mc, prefix):
+    """Find a contact dict by node prefix in mc.contacts."""
+    prefix = prefix.upper()
+    for pub_key, ct in mc.contacts.items():
+        if not isinstance(ct, dict):
+            continue
+        if pub_key[:8].upper() == prefix:
+            return ct
+    return None
+
+
+async def set_contact_path(mc, contact, path_result):
+    """Set routing path on a contact from a PathResult."""
+    if not contact or not path_result.found or path_result.hop_count == 0:
+        return
+    hops = path_result.path[:-1]
+    path_hex = "".join(p[:HOP_HEX_LEN].lower() for p in hops)
+    path_display = ",".join(p[:HOP_HEX_LEN].lower() for p in hops)
+    print(f"    Setting path: {path_display}")
+    try:
+        await mc.commands.change_contact_path(
+            contact, path_hex, path_hash_mode=PATH_HASH_MODE)
+    except Exception as e:
+        print(f"    Could not set path: {e}")
+
+
+async def login_to_node(mc, contact, node_name, password, timeout,
+                        max_wait=None):
+    """
+    Login to a repeater. Returns (success, error_msg).
+    Handles subscribe-before-send pattern to avoid race conditions.
+    max_wait caps the login response wait time (useful for interactive
+    single-node commands where you don't want to wait 60s+).
+    """
+    from meshcore import EventType
+
+    pw_display = f"'{password}'" if password else "(blank)"
+
+    login_future = asyncio.Future()
+
+    def _on_login(event):
+        if not login_future.done():
+            login_future.set_result(event)
+
+    login_sub = mc.subscribe(EventType.LOGIN_SUCCESS, _on_login)
+
+    try:
+        print(f"      TX: Sending login ({pw_display}) to {node_name}...")
+        login_result = await asyncio.wait_for(
+            mc.commands.send_login(contact, password), timeout=timeout)
+    except Exception as e:
+        login_sub.unsubscribe()
+        return False, f"login send error: {e}"
+
+    if login_result.type == EventType.ERROR:
+        login_sub.unsubscribe()
+        reason = login_result.payload.get("reason", "")
+        if reason == "no_event_received":
+            return False, "CONNECTION_LOST"
+        return False, f"login rejected ({pw_display})"
+
+    # Wait for LOGIN_SUCCESS over the air
+    # Divide by 800 (not 1000) to give ~25% extra margin over the
+    # suggested timeout (which is in milliseconds).
+    login_timeout = login_result.payload.get("suggested_timeout", 0) / 800
+    if isinstance(contact, dict) and contact.get("timeout", 0) != 0:
+        login_timeout = contact["timeout"]
+    login_timeout = max(login_timeout, 10.0)
+    if max_wait:
+        login_timeout = min(login_timeout, max_wait)
+
+    print(f"      ... waiting for login response "
+          f"(timeout={login_timeout:.0f}s)...")
+    try:
+        login_event = await asyncio.wait_for(
+            login_future, timeout=login_timeout)
+    except asyncio.TimeoutError:
+        login_event = None
+    finally:
+        login_sub.unsubscribe()
+
+    if login_event is None:
+        return False, f"login timeout ({pw_display})"
+    if login_event.type == EventType.LOGIN_SUCCESS:
+        print(f"      RX: Login SUCCESS with {pw_display}")
+        return True, ""
+    return False, f"login failed ({pw_display})"
+
+
+async def fetch_status(mc, contact, node, timeout):
+    """
+    Fetch status from a logged-in node with one retry.
+    Updates node.status and node.status_timestamp on success.
+    Returns the status dict or None.
+    """
+    status_data = None
+    for attempt in (1, 2):
+        try:
+            print(f"      TX: Requesting status from {node.name}"
+                  f" (attempt {attempt}/2)...")
+            status_data = await mc.commands.req_status_sync(
+                contact, min_timeout=timeout)
+            if status_data:
+                break
+            print(f"      RX: No status data")
+        except Exception as e:
+            print(f"      RX: Status error: {e}")
+        if attempt < 2:
+            await asyncio.sleep(2)
+
+    if status_data:
+        node.status = status_data
+        node.status_timestamp = datetime.now().isoformat(timespec='seconds')
+        bat = status_data.get('bat', 0)
+        tx_q = status_data.get('tx_queue_len', 0)
+        full = status_data.get('full_evts', 0)
+        uptime_h = status_data.get('uptime', 0) / 3600
+        print(f"      RX: Status — bat:{bat}mV  txq:{tx_q}  "
+              f"full_evts:{full}  uptime:{uptime_h:.1f}h")
+
+    return status_data
+
+
+# ---------------------------------------------------------------------------
 # Data collection helpers
 # ---------------------------------------------------------------------------
 
@@ -516,94 +647,24 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
 
 async def _login_and_neighbors(mc, contact, node, password_entry,
                                graph, timeout, name_map=None,
-                               contact_map=None):
+                               contact_map=None,
+                               max_login_wait=None):
     """
     Try guest login + fetch neighbor table via binary API.
     Returns (success, edges_added, error_msg, password_used).
     """
-    from meshcore import EventType
-
     pw = password_entry.password
-    pw_display = f"'{pw}'" if pw else "(blank)"
 
     try:
-        # Subscribe to LOGIN_SUCCESS BEFORE sending, to avoid race condition
-        # where the response arrives before we start waiting (close repeaters).
-        login_future = asyncio.Future()
+        ok, err = await login_to_node(
+            mc, contact, node.name, pw, timeout,
+            max_wait=max_login_wait)
+        if not ok:
+            return False, 0, err, ""
 
-        def _on_login(event):
-            if not login_future.done():
-                login_future.set_result(event)
+        await fetch_status(mc, contact, node, timeout)
 
-        login_sub = mc.subscribe(EventType.LOGIN_SUCCESS, _on_login)
-
-        # Step 1: send the login packet
-        print(f"      TX: Sending login ({pw_display}) to {node.name}...")
-        try:
-            login_result = await asyncio.wait_for(
-                mc.commands.send_login(contact, pw),
-                timeout=timeout
-            )
-        except Exception as e:
-            login_sub.unsubscribe()
-            raise
-
-        if login_result.type == EventType.ERROR:
-            login_sub.unsubscribe()
-            reason = login_result.payload.get("reason", "")
-            if reason == "no_event_received":
-                print(f"      RX: Radio connection lost!")
-                return False, 0, "CONNECTION_LOST", ""
-            print(f"      RX: Login error ({pw_display}): {login_result}")
-            return False, 0, f"login rejected ({pw_display})", ""
-
-        # Step 2: wait for actual LOGIN_SUCCESS over the air
-        # Divide by 800 (not 1000) to give ~25% extra margin over the
-        # suggested timeout (which is in milliseconds).
-        login_timeout = login_result.payload.get("suggested_timeout", 0) / 800
-        if isinstance(contact, dict) and contact.get("timeout", 0) != 0:
-            login_timeout = contact["timeout"]
-        login_timeout = max(login_timeout, 10.0)  # at least 10s
-
-        print(f"      ... waiting for login response (timeout={login_timeout:.0f}s)...")
-        try:
-            login_event = await asyncio.wait_for(login_future, timeout=login_timeout)
-        except asyncio.TimeoutError:
-            login_event = None
-        finally:
-            login_sub.unsubscribe()
-
-        if login_event is None:
-            print(f"      RX: Login timeout ({pw_display}) - no response")
-            return False, 0, f"login timeout ({pw_display})", ""
-
-        if login_event.type == EventType.LOGIN_SUCCESS:
-            print(f"      RX: Login SUCCESS with {pw_display}")
-        else:
-            print(f"      RX: Login failed ({pw_display}): {login_event.type}")
-            return False, 0, f"login failed ({pw_display})", ""
-
-        # Fetch node status (cheap single-packet request, same session)
-        try:
-            print(f"      TX: Requesting status from {node.name}...")
-            status_data = await mc.commands.req_status_sync(
-                contact, min_timeout=timeout)
-            if status_data:
-                node.status = status_data
-                node.status_timestamp = datetime.now().isoformat(
-                    timespec='seconds')
-                bat_mv = status_data.get('bat', 0)
-                tx_q = status_data.get('tx_queue_len', 0)
-                full = status_data.get('full_evts', 0)
-                uptime_h = status_data.get('uptime', 0) / 3600
-                print(f"      RX: Status — bat:{bat_mv}mV  txq:{tx_q}  "
-                      f"full_evts:{full}  uptime:{uptime_h:.1f}h")
-            else:
-                print(f"      RX: Status request returned no data")
-        except Exception as e:
-            print(f"      RX: Status error (non-fatal): {e}")
-
-        # Fetch neighbors via binary API (same call as meshcore-cli)
+        # Fetch neighbors via binary API
         # Use min_timeout to ensure enough time for multi-hop round trips.
         # Retry up to 4 times — login already succeeded so retries are cheap.
         max_attempts = 4
@@ -698,9 +759,6 @@ async def _ensure_connected(mc, radio_config):
 class _DiscoveryCtx:
     """Shared context for discovery phases."""
 
-    PATH_HASH_MODE = 1
-    HOP_HEX_LEN = 4  # (PATH_HASH_MODE + 1) * 2
-
     def __init__(self, mc, graph, companion_prefix, contact_map, name_map,
                  ds, passwords, default_guest_passwords, timeout, delay,
                  infer_penalty, radio_config, save_file, state_file,
@@ -750,19 +808,7 @@ class _DiscoveryCtx:
 
     async def set_contact_path(self, contact, path_result):
         """Set contact routing path. Requires contact dict."""
-        hops = path_result.path[:-1]
-        path_hex = "".join(
-            p[:self.HOP_HEX_LEN].lower() for p in hops)
-        path_display = ",".join(
-            p[:self.HOP_HEX_LEN].lower() for p in hops)
-        if contact:
-            print(f"    Setting path: {path_display}")
-            try:
-                await self.mc.commands.change_contact_path(
-                    contact, path_hex,
-                    path_hash_mode=self.PATH_HASH_MODE)
-            except Exception as e:
-                print(f"    Could not set path: {e}")
+        await set_contact_path(self.mc, contact, path_result)
 
     def filter_alternatives(self, alt_paths):
         """Drop alternatives whose bottleneck is too far below primary."""

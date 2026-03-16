@@ -220,6 +220,193 @@ _discovery = DiscoveryRunner()
 
 
 # ---------------------------------------------------------------------------
+# Node commands — single-node status/neighbors request via radio
+# ---------------------------------------------------------------------------
+
+class NodeCommander:
+    """Runs a single-node command (status/neighbors) in a background thread.
+    Non-blocking: start() returns immediately, poll get_result() for outcome."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.busy = False
+        self.result = None
+
+    def start(self, action, target_prefix, config_file, topology_file):
+        """Start a command. Returns immediately."""
+        with self._lock:
+            if self.busy:
+                return False, "Another command is running"
+            if _discovery.running:
+                return False, "Discovery is running"
+            self.busy = True
+            self.result = None
+
+        t = threading.Thread(
+            target=self._run_thread,
+            args=(action, target_prefix, config_file, topology_file),
+            daemon=True,
+        )
+        t.start()
+        return True, "Command started"
+
+    def get_result(self):
+        """Poll for result. Returns None while still running."""
+        if self.busy:
+            return None
+        return self.result
+
+    def _run_thread(self, action, target_prefix, config_file, topology_file):
+        from meshcore_discovery import (
+            load_config, Config, connect_radio,
+            match_passwords, _login_and_neighbors,
+        )
+        from meshcore_topology import NetworkGraph, widest_path
+
+        _discovery._log(f"--- {action.upper()} → {target_prefix} ---")
+        log_capture = _LogCapture(_discovery._log)
+        old_stdout = sys.stdout
+        sys.stdout = log_capture
+
+        try:
+            config = Config()
+            if os.path.exists(config_file):
+                config = load_config(config_file)
+
+            graph = NetworkGraph()
+            if os.path.exists(topology_file):
+                graph = NetworkGraph.load(topology_file)
+
+            companion = config.companion_prefix
+            target = target_prefix.upper()
+
+            node = graph.get_node(target)
+            if not node:
+                self.result = {"ok": False, "error": f"Node {target} not in topology"}
+                return
+
+            path_result = widest_path(graph, companion, node.prefix)
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                self.result = loop.run_until_complete(
+                    self._async_run(config, graph, node, path_result,
+                                    action, topology_file))
+            finally:
+                # Let pending tasks finish to avoid "Task destroyed" warnings
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    loop.run_until_complete(
+                        asyncio.gather(*pending, return_exceptions=True))
+                loop.close()
+
+        except Exception as e:
+            self.result = {"ok": False, "error": str(e)}
+        finally:
+            sys.stdout = old_stdout
+            _discovery._log(f"--- done ---")
+            with self._lock:
+                self.busy = False
+
+    async def _async_run(self, config, graph, node, path_result,
+                         action, topology_file):
+        from meshcore_discovery import (
+            connect_radio, match_passwords, find_contact,
+            set_contact_path,
+        )
+
+        mc = await connect_radio(config.radio)
+        try:
+            await mc.ensure_contacts(follow=True)
+
+            contact = find_contact(mc, node.prefix)
+            if not contact:
+                return {"ok": False, "error": f"No contact for {node.name}"}
+
+            await set_contact_path(mc, contact, path_result)
+
+            pw_list = match_passwords(
+                node, config.passwords,
+                config.default_guest_passwords)
+            # For single-node commands, limit password attempts to
+            # avoid long waits (each attempt can take 10s+ over radio)
+            pw_list = pw_list[:2]
+
+            if action == "status":
+                return await self._do_status_only(
+                    mc, contact, node, pw_list, config, graph, topology_file)
+            else:
+                return await self._do_neighbors(
+                    mc, contact, node, pw_list, config, graph, topology_file)
+        finally:
+            await mc.disconnect()
+
+    async def _do_status_only(self, mc, contact, node, pw_list,
+                              config, graph, topology_file):
+        """Login, fetch status only (no neighbors), logout."""
+        from meshcore_discovery import login_to_node, fetch_status
+
+        timeout = config.discovery_timeout
+
+        for pw_entry in pw_list:
+            ok, err = await login_to_node(
+                mc, contact, node.name, pw_entry.password, timeout,
+                max_wait=15)
+            if not ok:
+                if err == "CONNECTION_LOST":
+                    return {"ok": False, "error": "Connection lost"}
+                continue
+
+            await fetch_status(mc, contact, node, timeout)
+
+            try:
+                await mc.commands.send_logout(contact)
+            except Exception:
+                pass
+
+            graph.save(topology_file)
+            s = graph.stats()
+            return {
+                "ok": True, "node": node.prefix, "name": node.name,
+                "status": node.status or {},
+                "health_penalty": node.health_penalty,
+                "graph_nodes": s["nodes"], "graph_edges": s["edges"],
+            }
+
+        return {"ok": False, "error": "All passwords failed"}
+
+    async def _do_neighbors(self, mc, contact, node, pw_list,
+                            config, graph, topology_file):
+        """Login, fetch status + neighbors, logout."""
+        from meshcore_discovery import _login_and_neighbors
+
+        for pw_entry in pw_list:
+            ok, n_edges, err, used_pw = await _login_and_neighbors(
+                mc, contact, node, pw_entry, graph,
+                config.discovery_timeout, max_login_wait=15)
+
+            if not ok:
+                if err == "CONNECTION_LOST":
+                    return {"ok": False, "error": "Connection lost"}
+                continue
+
+            graph.infer_reverse_edges(config.discovery_infer_penalty)
+            graph.save(topology_file)
+            s = graph.stats()
+            return {
+                "ok": True, "node": node.prefix, "name": node.name,
+                "edges_added": n_edges,
+                "graph_nodes": s["nodes"], "graph_edges": s["edges"],
+            }
+
+        return {"ok": False, "error": "All passwords failed"}
+
+
+_commander = NodeCommander()
+
+
+# ---------------------------------------------------------------------------
 # API handler
 # ---------------------------------------------------------------------------
 
@@ -330,11 +517,19 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             state = _discovery.get_state()
             since = int(params.get("log_since", ["0"])[0])
             state["logs"] = _discovery.get_logs(since)
+            state["command_busy"] = _commander.busy
             self._send_json(state)
         elif path == "/api/config":
             cfg = self._load_config_dict()
             cfg["config_exists"] = os.path.exists(self.config_file)
             self._send_json(cfg)
+        elif path == "/api/node/result":
+            result = _commander.get_result()
+            if result is None:
+                self._send_json({"busy": True})
+            else:
+                result["busy"] = False
+                self._send_json(result)
         else:
             self.send_error(404)
 
@@ -355,6 +550,8 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             self._handle_save_config()
         elif path == "/api/radio/test":
             self._handle_radio_test()
+        elif path == "/api/node/command":
+            self._handle_node_command()
         else:
             self.send_error(404)
 
@@ -419,6 +616,22 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
 
         result["repeaters"].sort(key=lambda r: r["name"])
         self._send_json(result)
+
+    def _handle_node_command(self):
+        body = self._read_post_body()
+        action = body.get("action", "")
+        target = body.get("prefix", "")
+        if action not in ("status", "neighbors"):
+            self._send_json({"ok": False, "error": "action must be 'status' or 'neighbors'"}, 400)
+            return
+        if not target:
+            self._send_json({"ok": False, "error": "prefix required"}, 400)
+            return
+        ok, msg = _commander.start(
+            action, target,
+            self.config_file, self.topology_file,
+        )
+        self._send_json({"ok": ok, "message": msg})
 
     def _handle_path(self, params):
         src = params.get("from", [""])[0]
@@ -1012,6 +1225,9 @@ function buildNodePopup(pfx, node) {
     h += `<br><a class="btn" onclick="setPathFrom('${pfx}')">Route FROM</a>`;
     h += `<a class="btn" onclick="setPathTo('${pfx}')">Route TO</a>`;
     if (!isComp) h += `<a class="btn" onclick="setCompanion('${pfx}')">Set Home</a>`;
+    h += `<br><a class="btn" onclick="nodeCmd('status','${pfx}')">Req Status</a>`;
+    h += `<a class="btn" onclick="nodeCmd('neighbors','${pfx}')">Req Neighbors</a>`;
+    h += `<span id="cmdStatus_${pfx}" style="font-size:11px;margin-left:4px"></span>`;
     return h;
 }
 
@@ -1041,6 +1257,55 @@ function setPathTo(pfx) {
 function setCompanion(pfx) {
     companionPrefix = pfx;
     refreshTopology();
+}
+
+async function nodeCmd(action, pfx) {
+    const statusEl = document.getElementById('cmdStatus_' + pfx);
+    if (statusEl) { statusEl.textContent = 'starting...'; statusEl.style.color = '#ff9800'; }
+
+    try {
+        const resp = await fetch('/api/node/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action, prefix: pfx }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+            if (statusEl) { statusEl.textContent = data.message || data.error || 'failed'; statusEl.style.color = '#f44336'; }
+            return;
+        }
+    } catch (e) {
+        if (statusEl) { statusEl.textContent = 'error'; statusEl.style.color = '#f44336'; }
+        return;
+    }
+
+    // Start polling logs + result
+    startDiscPoll();
+    if (statusEl) { statusEl.textContent = 'running...'; }
+    _pollNodeResult(action, pfx, statusEl);
+}
+
+function _pollNodeResult(action, pfx, statusEl) {
+    const poll = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/node/result');
+            const data = await resp.json();
+            if (data.busy) return; // still running
+            clearInterval(poll);
+            if (data.ok) {
+                let msg = action === 'status'
+                    ? `OK (${data.status?.bat || '?'}mV, penalty ${(data.health_penalty||0).toFixed(1)}dB)`
+                    : `OK (+${data.edges_added || 0} edges)`;
+                if (statusEl) { statusEl.textContent = msg; statusEl.style.color = '#4caf50'; }
+                refreshTopology();
+            } else {
+                if (statusEl) { statusEl.textContent = data.error || 'failed'; statusEl.style.color = '#f44336'; }
+            }
+        } catch (e) {
+            clearInterval(poll);
+            if (statusEl) { statusEl.textContent = 'error'; statusEl.style.color = '#f44336'; }
+        }
+    }, 2000);
 }
 
 function panelFindPath() {
@@ -1246,8 +1511,10 @@ function updateDiscUI(data) {
         logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // Stop polling when not running
-    if (data.status !== 'running' && data.status !== 'stopping') {
+    // Keep polling while discovery runs OR a node command is in progress
+    const busy = data.status === 'running' || data.status === 'stopping'
+                 || data.command_busy;
+    if (!busy) {
         if (discPollTimer) { clearInterval(discPollTimer); discPollTimer = null; }
     }
 }
