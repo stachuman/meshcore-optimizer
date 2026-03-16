@@ -1556,30 +1556,29 @@ function renderPaths(data) {
     for (let i = 1; i < fwd.length; i++)
         allPaths.push({ label: `Alt ${i+1}`, pr: fwd[i], color: '#aaaaaa' });
     for (let i = 0; i < rev.length; i++)
-        allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
+        allPaths.push({ label: `Alt ${allPaths.length}`, pr: rev[i], color: '#ff66aa' });
 
     // Draw all paths on map, primary highlighted
     showAllPathsOnMap(allPaths, 0);
 
-    // Build result panel with radio buttons
-    let html = '<div style="margin-bottom:6px">';
+    // Build result panel with radio buttons in a stable container
+    let radioHtml = '<div id="pathRadios" style="margin-bottom:6px">';
     for (let i = 0; i < allPaths.length; i++) {
         const ap = allPaths[i];
         const checked = i === 0 ? 'checked' : '';
         const colorDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${ap.color};margin-right:4px"></span>`;
-        html += `<label style="display:block;cursor:pointer;padding:2px 0">`;
-        html += `<input type="radio" name="pathChoice" value="${i}" ${checked} onchange="onPathChoice(${i})" style="margin-right:4px">`;
-        html += `${colorDot}<b>${ap.label}</b>: ${fmtSnr(ap.pr.bottleneck_snr)} dB, ${ap.pr.hop_count} hops`;
-        html += `</label>`;
+        radioHtml += `<label style="display:block;cursor:pointer;padding:2px 0">`;
+        radioHtml += `<input type="radio" name="pathChoice" value="${i}" ${checked} onchange="onPathChoice(${i})" style="margin-right:4px">`;
+        radioHtml += `${colorDot}<b>${ap.label}</b>: ${fmtSnr(ap.pr.bottleneck_snr)} dB, ${ap.pr.hop_count} hops`;
+        radioHtml += `</label>`;
     }
-    html += '</div>';
+    radioHtml += '</div>';
 
-    // Detail for selected (primary initially)
-    html += pathDetailHtml(allPaths[0].pr);
+    let detailHtml = '<div id="pathDetail">' + pathDetailHtml(allPaths[0].pr);
+    if (data.health_aware) detailHtml += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
+    detailHtml += '</div>';
 
-    if (data.health_aware) html += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
-
-    document.getElementById('path-result').innerHTML = html;
+    document.getElementById('path-result').innerHTML = radioHtml + detailHtml;
 }
 
 function pathDetailHtml(pr) {
@@ -1603,21 +1602,18 @@ function onPathChoice(idx) {
     for (let i = 1; i < fwd.length; i++)
         allPaths.push({ label: `Alt ${i+1}`, pr: fwd[i], color: '#aaaaaa' });
     for (let i = 0; i < rev.length; i++)
-        allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
+        allPaths.push({ label: `Alt ${allPaths.length}`, pr: rev[i], color: '#ff66aa' });
 
     if (idx >= allPaths.length) return;
 
-    // Redraw all paths, selected one highlighted
     showAllPathsOnMap(allPaths, idx);
 
-    // Update detail section (keep radio buttons, replace detail below)
-    const resultEl = document.getElementById('path-result');
-    const detailStart = resultEl.innerHTML.indexOf('<div class="path-primary">');
-    if (detailStart > 0) {
-        const radioHtml = resultEl.innerHTML.substring(0, detailStart);
+    // Update only the detail div, radios stay untouched
+    const detailEl = document.getElementById('pathDetail');
+    if (detailEl) {
         let detail = pathDetailHtml(allPaths[idx].pr);
         if (_lastPathData.health_aware) detail += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
-        resultEl.innerHTML = radioHtml + detail;
+        detailEl.innerHTML = detail;
     }
 }
 
