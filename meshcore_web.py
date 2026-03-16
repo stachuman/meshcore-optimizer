@@ -164,6 +164,7 @@ class DiscoveryRunner:
                         save_file=topology_file,
                         default_guest_passwords=config.default_guest_passwords,
                         radio_config=config.radio,
+                        probe_distance_km=config.discovery_probe_distance_km,
                     )
                 finally:
                     await mc.disconnect()
@@ -995,9 +996,17 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
                 <div class="hint">Extra cost per hop. Higher = prefer shorter paths.</div>
             </div>
             <div>
+                <label class="field">Probe Distance (km)</label>
+                <input id="cfgProbeDist" type="number" value="2.0" step="0.5">
+                <div class="hint">Max distance to probe missing links between nodes.</div>
+            </div>
+        </div>
+        <div class="row">
+            <div>
                 <label class="field">Save File</label>
                 <input id="cfgSaveFile" value="topology.json">
             </div>
+            <div></div>
         </div>
     </div>
 
@@ -1838,6 +1847,7 @@ function populateSettingsForm(cfg) {
     document.getElementById('cfgDelay').value = disc.delay || 5;
     document.getElementById('cfgInferPenalty').value = disc.infer_penalty || 5;
     document.getElementById('cfgHopPenalty').value = disc.hop_penalty ?? 1.0;
+    document.getElementById('cfgProbeDist').value = disc.probe_distance_km ?? 2.0;
     document.getElementById('cfgSaveFile').value = disc.save_file || 'topology.json';
 
     // Health penalties
@@ -1910,6 +1920,7 @@ function buildConfigFromForm() {
             delay: f('cfgDelay') || 5,
             infer_penalty: f('cfgInferPenalty') || 5,
             hop_penalty: f('cfgHopPenalty') ?? 1.0,
+            probe_distance_km: f('cfgProbeDist') ?? 2.0,
             save_file: v('cfgSaveFile') || 'topology.json',
         },
         passwords: passwords,

@@ -25,6 +25,7 @@ License: MIT
 
 import json
 import heapq
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -599,6 +600,58 @@ class NetworkGraph:
             ))
 
         return graph
+
+
+# ---------------------------------------------------------------------------
+# Proximity helpers
+# ---------------------------------------------------------------------------
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Distance in km between two GPS coordinates."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dlon / 2) ** 2)
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def find_proximity_gaps(graph: 'NetworkGraph',
+                        max_distance_km: float = 2.0) -> list:
+    """
+    Find node pairs that are close but have no known edge.
+    Returns list of (node_a, node_b, distance_km) sorted by distance.
+    Only considers nodes with GPS coordinates.
+    """
+    gaps = []
+    prefixes = list(graph.nodes.keys())
+    seen = set()
+
+    for i, pa in enumerate(prefixes):
+        na = graph.nodes[pa]
+        if not na.lat or not na.lon:
+            continue
+        for pb in prefixes[i + 1:]:
+            nb = graph.nodes[pb]
+            if not nb.lat or not nb.lon:
+                continue
+
+            pair = tuple(sorted([pa, pb]))
+            if pair in seen:
+                continue
+            seen.add(pair)
+
+            # Skip if edge already exists in either direction
+            if graph.get_edge(pa, pb) or graph.get_edge(pb, pa):
+                continue
+
+            dist = haversine_km(na.lat, na.lon, nb.lat, nb.lon)
+            if dist <= max_distance_km:
+                gaps.append((na, nb, dist))
+
+    gaps.sort(key=lambda x: x[2])
+    return gaps
 
 
 # ---------------------------------------------------------------------------

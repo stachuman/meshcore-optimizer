@@ -168,30 +168,18 @@ Provides discovery control, path finding, network reports, topology editing, and
 
 ## How It Works
 
-### Discovery Process
+Discovery runs in rounds, each with four phases of increasing cost:
 
-1. **Round 0** -- Login to companion repeater, fetch its neighbor table (seeds the graph)
-2. **Rounds 1+** -- Two phases per round:
-   - **Trace sweep** -- Send trace packets to all reachable nodes (best SNR first), collecting bidirectional link measurements without needing login
-   - **Login phase** -- Authenticate to accessible repeaters for full neighbor tables, and collect node status (battery, congestion, uptime)
-3. **After each update** -- Infer reverse edges for one-way links, save topology to disk
+1. **Trace sweep** -- trace all reachable nodes (no login needed, bidirectional SNR)
+2. **Login & neighbors** -- authenticate for full neighbor tables + node status
+3. **Proximity probe** -- test close node pairs (< configurable km) with no known link
+4. **Flood discovery** -- last resort firmware-based path discovery for unreachable nodes
 
-### Widest-Path Algorithm
+Routes are computed using a **widest-path algorithm** (modified Dijkstra) that maximizes the weakest link SNR, with configurable hop penalty, health-aware routing, and soft handling of inferred edges.
 
-Routes are computed using a modified Dijkstra algorithm that maximizes the minimum SNR along a path (the "bottleneck"). Key features:
+Discovery state is saved after every update. You can stop and resume anytime -- already-traced nodes are skipped.
 
-- **Bidirectional SNR** -- Uses `min(forward_snr, reverse_snr)` since packets must travel both directions
-- **Hop-count tie-breaking** -- When two paths have equal bottleneck SNR, the shorter one wins
-- **Health penalties** -- Optionally reduces effective SNR through nodes with low battery, congested TX queues, event queue overflows, or high flood duplicate rates
-- **Alternative paths** -- Computed by excluding intermediates of better paths to find diverse routes
-
-### Data Sources (in order of quality)
-
-| Source | Method | Quality |
-|--------|--------|---------|
-| `neighbors` | Guest login + fetch neighbor table | Full SNR data with timestamps |
-| `trace` | Send trace through repeater chain | Bidirectional per-hop SNR |
-| `inferred` | Estimated reverse of known edges | Forward SNR minus penalty |
+For the complete technical description, see **[Discovery Process & Routing Algorithm](DISCOVERY.md)**.
 
 ## Project Structure
 

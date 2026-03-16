@@ -147,6 +147,7 @@ class Config:
     discovery_infer_penalty: float = 5.0
     discovery_save_file: str = "topology.json"
     discovery_hop_penalty: float = 1.0
+    discovery_probe_distance_km: float = 2.0
     passwords: list = None
     default_guest_passwords: list = None
     health_penalties: dict = None
@@ -201,6 +202,7 @@ def load_config(filename: str) -> Config:
         discovery_infer_penalty=disc.get("infer_penalty", 5.0),
         discovery_save_file=disc.get("save_file", "topology.json"),
         discovery_hop_penalty=disc.get("hop_penalty", 1.0),
+        discovery_probe_distance_km=disc.get("probe_distance_km", 2.0),
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
                                          DEFAULT_GUEST_PASSWORDS),
@@ -783,7 +785,7 @@ class _DiscoveryCtx:
     def __init__(self, mc, graph, companion_prefix, contact_map, name_map,
                  ds, passwords, default_guest_passwords, timeout, delay,
                  infer_penalty, radio_config, save_file, state_file,
-                 alt_snr_gap=10.0):
+                 alt_snr_gap=10.0, probe_distance_km=2.0):
         self.mc = mc
         self.graph = graph
         self.companion_prefix = companion_prefix
@@ -799,6 +801,7 @@ class _DiscoveryCtx:
         self.save_file = save_file
         self.state_file = state_file
         self.alt_snr_gap = alt_snr_gap
+        self.probe_distance_km = probe_distance_km
 
     def fix_names(self):
         """Update node names and locations from contact data."""
@@ -1151,6 +1154,183 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
     return login_count
 
 
+async def _run_proximity_probe(ctx: _DiscoveryCtx):
+    """Phase 3: Probe close node pairs that have no known edge.
+    Uses trace through A→B to test if they can hear each other.
+    No login needed."""
+    from meshcore_topology import find_proximity_gaps, widest_path
+
+    gaps = find_proximity_gaps(ctx.graph, ctx.probe_distance_km)
+    if not gaps:
+        return 0
+
+    print(f"\n  Phase 3: Proximity probe "
+          f"({len(gaps)} gaps within {ctx.probe_distance_km} km)")
+
+    probe_count = 0
+    for node_a, node_b, dist_km in gaps:
+        # Need a route to at least one of them
+        path_a = widest_path(ctx.graph, ctx.companion_prefix, node_a.prefix)
+        path_b = widest_path(ctx.graph, ctx.companion_prefix, node_b.prefix)
+
+        if not path_a.found and not path_b.found:
+            continue
+
+        # Pick the one with better path as "via", the other as target
+        if path_a.found and (not path_b.found or
+                path_a.bottleneck_snr >= path_b.bottleneck_snr):
+            via_node, target_node = node_a, node_b
+            via_path = path_a
+        else:
+            via_node, target_node = node_b, node_a
+            via_path = path_b
+
+        print(f"\n    Probing: {via_node.name} [{via_node.prefix[:4]}] "
+              f"↔ {target_node.name} [{target_node.prefix[:4]}] "
+              f"({dist_km:.1f} km)")
+
+        # Build trace: companion → ... → via → target → via → ... → companion
+        ADDR_HEX = 4
+        via_hops = [p[:ADDR_HEX].lower() for p in via_path.path]
+        target_hop = target_node.prefix[:ADDR_HEX].lower()
+
+        # Forward: companion_path_to_via + target
+        fwd = via_hops + [target_hop]
+        # Round-trip: fwd + reverse back
+        trace_addrs = fwd + list(reversed(fwd[:-1]))
+        trace_path = ",".join(trace_addrs)
+
+        contact = ctx.contact_map.get(target_node.prefix)
+        if not contact:
+            # Try via_node's contact instead
+            contact = ctx.contact_map.get(via_node.prefix)
+        if not contact:
+            print(f"    No contact for either node, skipping")
+            continue
+
+        if ctx.radio_config:
+            try:
+                await ctx.ensure_connected()
+            except Exception:
+                break
+
+        print(f"    Trace path: {trace_path}")
+        ok, t_edges, err = await _trace_repeater(
+            ctx.mc, contact, ctx.companion_prefix,
+            target_node.prefix, ctx.graph, ctx.timeout)
+
+        if ok and t_edges > 0:
+            print(f"    +{t_edges} edges from proximity probe")
+            ctx.graph.infer_reverse_edges(ctx.infer_penalty)
+            ctx.fix_names()
+            ctx.save()
+        elif err:
+            print(f"    {err}")
+
+        probe_count += 1
+        await asyncio.sleep(ctx.delay)
+
+    return probe_count
+
+
+async def _run_flood_discovery(ctx: _DiscoveryCtx):
+    """Phase 4: Last resort — use firmware flood-based path discovery
+    for nodes where login failed, trace failed, and proximity probe
+    didn't help. Asks the network 'who can reach this node?'"""
+    from meshcore import EventType
+
+    # Find nodes with no good edges and failed discovery
+    candidates = []
+    for prefix in list(ctx.graph.nodes.keys()):
+        if prefix == ctx.companion_prefix:
+            continue
+        node = ctx.graph.nodes[prefix]
+        contact = ctx.contact_map.get(prefix)
+        if not contact:
+            continue
+
+        # Only for nodes where we have poor/no data
+        out_edges = ctx.graph.edges.get(prefix, [])
+        in_edges = ctx.graph.reverse_edges.get(prefix, [])
+        measured = [e for e in out_edges + in_edges
+                    if e.source in ("neighbors", "trace")]
+        if measured:
+            continue  # already have real data
+
+        # Check if in traced_set but still no measured edges
+        if prefix in ctx.ds.traced_set:
+            candidates.append((prefix, node, contact))
+
+    if not candidates:
+        return 0
+
+    print(f"\n  Phase 4: Flood discovery "
+          f"({len(candidates)} candidates)")
+
+    flood_count = 0
+    for prefix, node, contact in candidates:
+        print(f"\n    Flood: {node.name} [{prefix[:4]}]")
+
+        if ctx.radio_config:
+            try:
+                await ctx.ensure_connected()
+            except Exception:
+                break
+
+        # Subscribe to PATH_RESPONSE before sending
+        path_queue = asyncio.Queue()
+
+        def _on_path(event):
+            path_queue.put_nowait(event)
+
+        sub = ctx.mc.subscribe(EventType.PATH_RESPONSE, _on_path)
+
+        try:
+            print(f"      TX: Path discovery request...")
+            res = await asyncio.wait_for(
+                ctx.mc.commands.send_path_discovery(contact),
+                timeout=ctx.timeout)
+
+            if res is None or res.type == EventType.ERROR:
+                sub.unsubscribe()
+                err = res.payload if res else "None"
+                print(f"      TX: Failed: {err}")
+                continue
+
+            # Wait for response
+            try:
+                ev = await asyncio.wait_for(
+                    path_queue.get(), timeout=ctx.timeout)
+            except asyncio.TimeoutError:
+                print(f"      RX: No response (timeout)")
+                continue
+            finally:
+                sub.unsubscribe()
+
+            out_path = ev.payload.get("out_path", "")
+            in_path = ev.payload.get("in_path", "")
+            out_len = ev.payload.get("out_path_len", 0)
+            in_len = ev.payload.get("in_path_len", 0)
+
+            print(f"      RX: Discovered — out_path: {out_path} "
+                  f"({out_len} hops), in_path: {in_path} "
+                  f"({in_len} hops)")
+
+            # The discovered paths tell us the firmware's routing
+            # but don't give SNR. Mark as known-reachable.
+            if out_path or in_path:
+                flood_count += 1
+
+        except asyncio.TimeoutError:
+            print(f"      Timeout")
+        except Exception as e:
+            print(f"      Error: {e}")
+
+        await asyncio.sleep(ctx.delay)
+
+    return flood_count
+
+
 # ---------------------------------------------------------------------------
 # Discovery orchestrator
 # ---------------------------------------------------------------------------
@@ -1164,7 +1344,8 @@ async def progressive_discovery(mc, graph: NetworkGraph,
                                 infer_penalty: float = 5.0,
                                 save_file: str = None,
                                 default_guest_passwords: list = None,
-                                radio_config: RadioConfig = None):
+                                radio_config: RadioConfig = None,
+                                probe_distance_km: float = 2.0):
     """
     Run progressive topology discovery.
 
@@ -1172,6 +1353,8 @@ async def progressive_discovery(mc, graph: NetworkGraph,
     Rounds 1+:
       Phase 1 — Trace sweep: trace all reachable nodes (best-first).
       Phase 2 — Login bonus: login for full neighbor tables (richer data).
+      Phase 3 — Proximity probe: test close node pairs with no known edge.
+      Phase 4 — Flood discovery: last resort for nodes with no real data.
 
     Saves topology after every graph update. State is persisted for resume.
     """
@@ -1274,6 +1457,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
         timeout=timeout, delay=delay, infer_penalty=infer_penalty,
         radio_config=radio_config, save_file=save_file,
         state_file=state_file,
+        probe_distance_km=probe_distance_km,
     )
 
     stopped = False
@@ -1297,13 +1481,16 @@ async def progressive_discovery(mc, graph: NetworkGraph,
             await ctx.refresh_contacts()
             trace_count = await _run_trace_phase(ctx)
             login_count = await _run_login_phase(ctx)
+            probe_count = await _run_proximity_probe(ctx)
+            flood_count = await _run_flood_discovery(ctx)
 
             round_edges = graph.stats()['edges'] - round_edges_before
             duration = time.monotonic() - round_start
             s = graph.stats()
 
             print(f"\n  Round {round_num}: {trace_count} traces, "
-                  f"{login_count} logins, +{round_edges} edges")
+                  f"{login_count} logins, {probe_count} probes, "
+                  f"{flood_count} floods, +{round_edges} edges")
             print(f"  Graph: {s['nodes']} nodes, {s['edges']} edges  "
                   f"({duration:.1f}s)")
 
@@ -1775,6 +1962,7 @@ Examples:
                 save_file=config.discovery_save_file,
                 default_guest_passwords=default_guest_pws,
                 radio_config=config.radio,
+                probe_distance_km=config.discovery_probe_distance_km,
             )
         finally:
             await mc.disconnect()

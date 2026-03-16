@@ -923,6 +923,7 @@ def run_live_discovery(state: AppState):
                 save_file=state.config.discovery_save_file,
                 default_guest_passwords=state.default_guest_pws,
                 radio_config=state.config.radio,
+                probe_distance_km=state.config.discovery_probe_distance_km,
             )
             state.modified = False  # saved by progressive_discovery
         except KeyboardInterrupt:
