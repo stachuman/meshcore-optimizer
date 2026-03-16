@@ -51,7 +51,7 @@ Connects to your MeshCore companion radio, progressively discovers all reachable
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/meshcore-optimizer.git
+git clone https://github.com/stachuman/meshcore-optimizer.git
 cd meshcore-optimizer
 python3 -m venv .venv
 source .venv/bin/activate

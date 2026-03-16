@@ -572,12 +572,17 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         protocol = body.get("protocol", "tcp")
         host = body.get("host", "")
         port = body.get("port", 5000)
+        serial_port = body.get("serial_port", "")
+        baudrate = body.get("baudrate", 115200)
+        ble_address = body.get("ble_address", "")
 
         result = {"ok": False, "repeaters": [], "error": ""}
 
         def _run():
             from meshcore_discovery import RadioConfig, connect_radio
-            rc = RadioConfig(protocol=protocol, host=host, port=int(port))
+            rc = RadioConfig(protocol=protocol, host=host, port=int(port),
+                             serial_port=serial_port, baudrate=int(baudrate),
+                             ble_address=ble_address)
 
             async def _test():
                 mc = await connect_radio(rc)
@@ -863,12 +868,12 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
 
     <h4>Radio Connection</h4>
     <label class="field">Protocol</label>
-    <select id="cfgProtocol">
+    <select id="cfgProtocol" onchange="updateProtocolFields()">
         <option value="tcp">TCP</option>
-        <option value="serial">Serial</option>
+        <option value="serial">Serial / USB</option>
         <option value="ble">BLE</option>
     </select>
-    <div class="row">
+    <div class="row" id="rowTcp">
         <div>
             <label class="field">Host / Port</label>
             <input id="cfgHost" placeholder="192.168.1.100">
@@ -877,6 +882,22 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
             <label class="field">&nbsp;</label>
             <input id="cfgPort" type="number" value="5000" placeholder="5000">
         </div>
+    </div>
+    <div id="rowSerial" style="display:none">
+        <div class="row">
+            <div>
+                <label class="field">Serial Port</label>
+                <input id="cfgSerialPort" placeholder="/dev/ttyACM0">
+            </div>
+            <div style="max-width:120px">
+                <label class="field">Baud Rate</label>
+                <input id="cfgBaudrate" type="number" value="115200">
+            </div>
+        </div>
+    </div>
+    <div id="rowBle" style="display:none">
+        <label class="field">BLE Address (optional)</label>
+        <input id="cfgBleAddress" placeholder="AA:BB:CC:DD:EE:FF">
     </div>
     <div style="margin-top:8px">
         <button onclick="testRadio()" id="btnTestRadio">Test Connection</button>
@@ -1557,11 +1578,22 @@ function closeSettings() {
     document.getElementById('settingsModal').classList.remove('open');
 }
 
+function updateProtocolFields() {
+    const proto = document.getElementById('cfgProtocol').value;
+    document.getElementById('rowTcp').style.display = proto === 'tcp' ? '' : 'none';
+    document.getElementById('rowSerial').style.display = proto === 'serial' ? '' : 'none';
+    document.getElementById('rowBle').style.display = proto === 'ble' ? '' : 'none';
+}
+
 function populateSettingsForm(cfg) {
     const radio = cfg.radio || {};
     document.getElementById('cfgProtocol').value = radio.protocol || 'tcp';
     document.getElementById('cfgHost').value = radio.host || '';
     document.getElementById('cfgPort').value = radio.port || 5000;
+    document.getElementById('cfgSerialPort').value = radio.serial_port || '';
+    document.getElementById('cfgBaudrate').value = radio.baudrate || 115200;
+    document.getElementById('cfgBleAddress').value = radio.ble_address || '';
+    updateProtocolFields();
     document.getElementById('cfgCompanion').value = cfg.companion_prefix || '';
     const disc = cfg.discovery || {};
     document.getElementById('cfgMaxRounds').value = disc.max_rounds || 5;
@@ -1589,6 +1621,9 @@ function buildConfigFromForm() {
             protocol: document.getElementById('cfgProtocol').value,
             host: document.getElementById('cfgHost').value.trim(),
             port: parseInt(document.getElementById('cfgPort').value) || 5000,
+            serial_port: document.getElementById('cfgSerialPort').value.trim(),
+            baudrate: parseInt(document.getElementById('cfgBaudrate').value) || 115200,
+            ble_address: document.getElementById('cfgBleAddress').value.trim(),
         },
         companion_prefix: document.getElementById('cfgCompanion').value.trim().toUpperCase(),
         discovery: {
@@ -1641,6 +1676,9 @@ async function testRadio() {
         protocol: document.getElementById('cfgProtocol').value,
         host: document.getElementById('cfgHost').value.trim(),
         port: parseInt(document.getElementById('cfgPort').value) || 5000,
+        serial_port: document.getElementById('cfgSerialPort').value.trim(),
+        baudrate: parseInt(document.getElementById('cfgBaudrate').value) || 115200,
+        ble_address: document.getElementById('cfgBleAddress').value.trim(),
     };
 
     try {
