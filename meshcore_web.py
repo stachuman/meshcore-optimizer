@@ -1528,10 +1528,19 @@ async function computePath() {
     }
 }
 
-function renderPaths(data) {
-    pathLines.forEach(l => map.removeLayer(l));
-    pathLines = [];
+let _lastPathData = null; // stored for re-draw on radio selection change
 
+function fmtSnr(v) { return (v>=0?'+':'')+v.toFixed(1); }
+function pathHex(pr) { return pr.path.map(p => p.substring(0,4).toLowerCase()).join(','); }
+function pathLine(pr) {
+    return pr.path.map(pfx => {
+        const n = topo.nodes[pfx];
+        return `${escHtml(n?n.name:pfx)} [${pfx.substring(0,4)}]`;
+    }).join(' → ');
+}
+
+function renderPaths(data) {
+    _lastPathData = data;
     const fwd = data.paths || [];
     const rev = data.reverse_paths || [];
 
@@ -1541,62 +1550,98 @@ function renderPaths(data) {
         return;
     }
 
-    const p = fwd[0];
+    // Build all path options for radio buttons
+    const allPaths = [];
+    allPaths.push({ label: 'Primary', pr: fwd[0], color: '#00d4ff' });
+    for (let i = 1; i < fwd.length; i++)
+        allPaths.push({ label: `Alt ${i+1}`, pr: fwd[i], color: '#aaaaaa' });
+    for (let i = 0; i < rev.length; i++)
+        allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
 
-    // Draw alternatives behind
-    for (let i = fwd.length-1; i >= 1; i--) drawPathLine(fwd[i], '#555', 3, '8,6', 0.5);
-    // Primary
-    drawPathLine(p, '#00d4ff', 5, null, 0.9);
-    // Reverse if different
-    if (rev.length > 0) {
-        const rp = rev[0].path.join(',');
-        const fp = p.path.join(',');
-        if (rp !== fp.split(',').reverse().join(',')) drawPathLine(rev[0], '#ff66aa', 3, '6,4', 0.6);
-    }
-    for (const pfx of p.path) highlightNode(pfx, true);
+    // Draw selected path on map (default: primary)
+    showPathOnMap(allPaths[0].pr, allPaths[0].color);
 
-    // Helpers for path display
-    function fmtSnr(v) { return (v>=0?'+':'')+v.toFixed(1); }
-    function pathHex(pr) {
-        return pr.path.map(p => p.substring(0,4).toLowerCase()).join(',');
+    // Build result panel with radio buttons
+    let html = '<div style="margin-bottom:6px">';
+    for (let i = 0; i < allPaths.length; i++) {
+        const ap = allPaths[i];
+        const checked = i === 0 ? 'checked' : '';
+        const colorDot = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${ap.color};margin-right:4px"></span>`;
+        html += `<label style="display:block;cursor:pointer;padding:2px 0">`;
+        html += `<input type="radio" name="pathChoice" value="${i}" ${checked} onchange="onPathChoice(${i})" style="margin-right:4px">`;
+        html += `${colorDot}<b>${ap.label}</b>: ${fmtSnr(ap.pr.bottleneck_snr)} dB, ${ap.pr.hop_count} hops`;
+        html += `</label>`;
     }
-    function pathLine(pr) {
-        return pr.path.map((pfx,i) => {
-            const n = topo.nodes[pfx];
-            return `${escHtml(n?n.name:pfx)} [${pfx.substring(0,4)}]`;
-        }).join(' → ');
-    }
+    html += '</div>';
 
-    // Result panel — primary
-    let html = `<div class="path-primary">${pathLine(p)}</div>`;
-    html += `<div><span class="bottleneck">Bottleneck: ${fmtSnr(p.bottleneck_snr)} dB</span> | Hops: ${p.hop_count}</div>`;
-    html += `<div style="font-size:11px;color:#8899aa;margin-top:2px">Path: ${pathHex(p)}</div>`;
-
-    // Per-hop detail
-    html += `<table style="margin-top:4px">`;
-    for (const e of p.edges) {
-        const fn = topo.nodes[e.from], tn = topo.nodes[e.to];
-        html += `<tr><td>${escHtml(fn?fn.name:e.from)} [${e.from.substring(0,4)}]</td><td>→</td><td class="${snrClass(e.snr_db)}">${fmtSnr(e.snr_db)} dB</td></tr>`;
-    }
-    html += `</table>`;
-
-    // Alternatives
-    for (let i = 1; i < fwd.length; i++) {
-        const a = fwd[i];
-        html += `<div class="path-alt" style="margin-top:6px">Alt ${i+1}: ${pathLine(a)} (${fmtSnr(a.bottleneck_snr)} dB)</div>`;
-        html += `<div style="font-size:11px;color:#666">Path: ${pathHex(a)}</div>`;
-    }
-
-    // Reverse
-    if (rev.length > 0) {
-        const r = rev[0];
-        html += `<div class="reverse" style="margin-top:6px">Reverse: ${pathLine(r)} (${fmtSnr(r.bottleneck_snr)} dB)</div>`;
-        html += `<div style="font-size:11px;color:#666">Path: ${pathHex(r)}</div>`;
-    }
+    // Detail for selected (primary initially)
+    html += pathDetailHtml(allPaths[0].pr);
 
     if (data.health_aware) html += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
 
     document.getElementById('path-result').innerHTML = html;
+}
+
+function pathDetailHtml(pr) {
+    let html = `<div class="path-primary">${pathLine(pr)}</div>`;
+    html += `<div style="font-size:11px;color:#8899aa;margin-top:2px">Path: ${pathHex(pr)}</div>`;
+    html += `<table style="margin-top:4px">`;
+    for (const e of pr.edges) {
+        const fn = topo.nodes[e.from];
+        html += `<tr><td>${escHtml(fn?fn.name:e.from)} [${e.from.substring(0,4)}]</td><td>→</td><td class="${snrClass(e.snr_db)}">${fmtSnr(e.snr_db)} dB</td></tr>`;
+    }
+    html += `</table>`;
+    return html;
+}
+
+function onPathChoice(idx) {
+    if (!_lastPathData) return;
+    const fwd = _lastPathData.paths || [];
+    const rev = _lastPathData.reverse_paths || [];
+    const allPaths = [];
+    allPaths.push({ label: 'Primary', pr: fwd[0], color: '#00d4ff' });
+    for (let i = 1; i < fwd.length; i++)
+        allPaths.push({ label: `Alt ${i+1}`, pr: fwd[i], color: '#aaaaaa' });
+    for (let i = 0; i < rev.length; i++)
+        allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
+
+    if (idx >= allPaths.length) return;
+    const ap = allPaths[idx];
+
+    showPathOnMap(ap.pr, ap.color);
+
+    // Update detail section (keep radio buttons, replace detail below)
+    const resultEl = document.getElementById('path-result');
+    const detailStart = resultEl.innerHTML.indexOf('<div class="path-primary">');
+    if (detailStart > 0) {
+        const radioHtml = resultEl.innerHTML.substring(0, detailStart);
+        let detail = pathDetailHtml(ap.pr);
+        if (_lastPathData.health_aware) detail += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
+        resultEl.innerHTML = radioHtml + detail;
+    }
+}
+
+function showPathOnMap(pr, color) {
+    // Clear old path lines
+    pathLines.forEach(l => map.removeLayer(l));
+    pathLines = [];
+    // Reset node styles
+    if (topo) {
+        for (const [pfx, node] of Object.entries(topo.nodes)) {
+            const m = markers[pfx]; if (!m) continue;
+            const isC = pfx === companionPrefix;
+            const pen = node.health_penalty || 0;
+            let col = '#888';
+            if (node.status && Object.keys(node.status).length) col = healthColor(pen);
+            if (isC) col = '#0088ff';
+            m.setStyle({ weight: isC?3:2, color: isC?'#00d4ff':(node._estimated?'#999':col),
+                          fillOpacity: 0.9, dashArray: node._estimated?'3,3':null });
+            m.setRadius(isC ? 10 : 7);
+        }
+    }
+    // Draw selected path
+    drawPathLine(pr, color, 5, null, 0.9);
+    for (const pfx of pr.path) highlightNode(pfx, true);
 }
 
 function drawPathLine(pathResult, color, weight, dashArray, opacity) {
