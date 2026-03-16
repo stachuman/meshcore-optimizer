@@ -61,50 +61,78 @@ class RepeaterNode:
     @property
     def health_penalty(self) -> float:
         """Health penalty in dB (0.0 = healthy, higher = worse)."""
-        return compute_node_health_penalty(self.status)
+        return compute_node_health_penalty(self.status, _health_weights)
 
 
-def compute_node_health_penalty(status: dict) -> float:
+# Module-level weights, set from config via set_health_weights()
+_health_weights = None
+
+
+def set_health_weights(weights: dict):
+    """Set custom health penalty weights from config."""
+    global _health_weights
+    _health_weights = weights if weights else None
+
+
+DEFAULT_HEALTH_PENALTIES = {
+    "battery_critical": 3.0,     # bat < 3300 mV
+    "battery_warning": 1.0,      # bat < 3500 mV
+    "txqueue_high": 4.0,         # tx_queue_len > 5
+    "txqueue_low": 1.0,          # tx_queue_len > 0
+    "full_evts_high": 4.0,       # full_evts > 10
+    "full_evts_per": 0.5,        # per event, 1-10 (capped at 3.0)
+    "flood_dup_high": 3.0,       # dup rate > 70%
+    "flood_dup_medium": 1.0,     # dup rate > 50%
+}
+
+
+def compute_node_health_penalty(status: dict,
+                                weights: dict = None) -> float:
     """
     Compute a health penalty in dB from repeater status data.
     Returns 0.0 for healthy nodes, positive values for degraded nodes.
     The penalty reduces effective path SNR when routing through this node.
+    Weights can override DEFAULT_HEALTH_PENALTIES per factor.
     """
     if not status:
         return 0.0
 
+    w = dict(DEFAULT_HEALTH_PENALTIES)
+    if weights:
+        w.update(weights)
+
     penalty = 0.0
 
-    # Battery: critical below 3300mV, warning below 3500mV
+    # Battery
     bat = status.get("bat", 4200)
     if bat < 3300:
-        penalty += 6.0
+        penalty += w["battery_critical"]
     elif bat < 3500:
-        penalty += 2.0
+        penalty += w["battery_warning"]
 
     # TX queue congestion
     tx_queue = status.get("tx_queue_len", 0)
     if tx_queue > 5:
-        penalty += 4.0
+        penalty += w["txqueue_high"]
     elif tx_queue > 0:
-        penalty += 1.0
+        penalty += w["txqueue_low"]
 
     # Event queue overflows indicate chronic overload
     full_evts = status.get("full_evts", 0)
     if full_evts > 10:
-        penalty += 4.0
+        penalty += w["full_evts_high"]
     elif full_evts > 0:
-        penalty += min(full_evts * 0.5, 3.0)
+        penalty += min(full_evts * w["full_evts_per"], 3.0)
 
-    # Flood duplicate rate: recv_flood includes dups, flood_dups is the subset
+    # Flood duplicate rate
     recv_flood = status.get("recv_flood", 0)
     flood_dups = status.get("flood_dups", 0)
     if recv_flood > 100:
         dup_rate = flood_dups / recv_flood
         if dup_rate > 0.7:
-            penalty += 3.0
+            penalty += w["flood_dup_high"]
         elif dup_rate > 0.5:
-            penalty += 1.0
+            penalty += w["flood_dup_medium"]
 
     return penalty
 

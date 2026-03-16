@@ -16,5 +16,15 @@
   "default_guest_passwords": [
     "",
     "hello"
-  ]
+  ],
+  "health_penalties": {
+    "battery_critical": 3.0,
+    "battery_warning": 1.0,
+    "txqueue_high": 4.0,
+    "txqueue_low": 1.0,
+    "full_evts_high": 4.0,
+    "full_evts_per": 0.5,
+    "flood_dup_high": 3.0,
+    "flood_dup_medium": 1.0
+  }
 }

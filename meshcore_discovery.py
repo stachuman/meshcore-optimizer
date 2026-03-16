@@ -148,6 +148,7 @@ class Config:
     discovery_save_file: str = "topology.json"
     passwords: list = None
     default_guest_passwords: list = None
+    health_penalties: dict = None
 
     def __post_init__(self):
         if self.radio is None:
@@ -184,6 +185,12 @@ def load_config(filename: str) -> Config:
             name=item.get("name", ""),
         ))
 
+    health_penalties = data.get("health_penalties", None)
+
+    # Apply health weights globally so RepeaterNode.health_penalty uses them
+    from meshcore_topology import set_health_weights
+    set_health_weights(health_penalties)
+
     return Config(
         radio=radio,
         companion_prefix=data.get("companion_prefix", "").upper(),
@@ -195,6 +202,7 @@ def load_config(filename: str) -> Config:
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
                                          DEFAULT_GUEST_PASSWORDS),
+        health_penalties=health_penalties,
     )
 
 
@@ -326,12 +334,23 @@ def find_contact(mc, prefix):
 
 async def set_contact_path(mc, contact, path_result):
     """Set routing path on a contact from a PathResult."""
-    if not contact or not path_result.found or path_result.hop_count == 0:
+    if not path_result.found:
+        print(f"    Route: no path found")
         return
+
+    # Log route with names and prefixes
+    hops_display = " -> ".join(
+        f"{n} [{p[:4]}]"
+        for n, p in zip(path_result.path_names, path_result.path))
+    print(f"    Route: {hops_display} "
+          f"({path_result.bottleneck_snr:+.1f} dB, "
+          f"{path_result.hop_count} hops)")
+
+    if not contact or path_result.hop_count == 0:
+        return
+
     hops = path_result.path[:-1]
     path_hex = "".join(p[:HOP_HEX_LEN].lower() for p in hops)
-    path_display = ",".join(p[:HOP_HEX_LEN].lower() for p in hops)
-    print(f"    Setting path: {path_display}")
     try:
         await mc.commands.change_contact_path(
             contact, path_hex, path_hash_mode=PATH_HASH_MODE)

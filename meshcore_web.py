@@ -263,7 +263,6 @@ class NodeCommander:
         )
         from meshcore_topology import NetworkGraph, widest_path
 
-        _discovery._log(f"--- {action.upper()} → {target_prefix} ---")
         log_capture = _LogCapture(_discovery._log)
         old_stdout = sys.stdout
         sys.stdout = log_capture
@@ -277,13 +276,19 @@ class NodeCommander:
             if os.path.exists(topology_file):
                 graph = NetworkGraph.load(topology_file)
 
-            companion = config.companion_prefix
             target = target_prefix.upper()
 
             node = graph.get_node(target)
             if not node:
                 self.result = {"ok": False, "error": f"Node {target} not in topology"}
                 return
+
+            print(f"  === {action.upper()}: "
+                  f"{node.name} [{node.prefix}] ===")
+
+            # Resolve companion (may be short prefix like "5364")
+            comp_node = graph.get_node(config.companion_prefix)
+            companion = comp_node.prefix if comp_node else config.companion_prefix
 
             path_result = widest_path(graph, companion, node.prefix)
 
@@ -560,8 +565,10 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(body, f, indent=2)
-            # Update companion on the handler
             MapHandler.companion_prefix = body.get("companion_prefix", "")
+            # Apply health weights
+            from meshcore_topology import set_health_weights
+            set_health_weights(body.get("health_penalties"))
             self._send_json({"ok": True})
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)}, 500)
@@ -1387,28 +1394,43 @@ function renderPaths(data) {
     }
     for (const pfx of p.path) highlightNode(pfx, true);
 
-    // Result panel
-    let html = `<div class="path-primary">${p.path_names.map(escHtml).join(' → ')}</div>`;
-    html += `<div><span class="bottleneck">Bottleneck: ${p.bottleneck_snr>=0?'+':''}${p.bottleneck_snr.toFixed(1)} dB</span> | Hops: ${p.hop_count}</div>`;
+    // Helpers for path display
+    function fmtSnr(v) { return (v>=0?'+':'')+v.toFixed(1); }
+    function pathHex(pr) {
+        return pr.path.map(p => p.substring(0,4).toLowerCase()).join(',');
+    }
+    function pathLine(pr) {
+        return pr.path.map((pfx,i) => {
+            const n = topo.nodes[pfx];
+            return `${escHtml(n?n.name:pfx)} [${pfx.substring(0,4)}]`;
+        }).join(' → ');
+    }
+
+    // Result panel — primary
+    let html = `<div class="path-primary">${pathLine(p)}</div>`;
+    html += `<div><span class="bottleneck">Bottleneck: ${fmtSnr(p.bottleneck_snr)} dB</span> | Hops: ${p.hop_count}</div>`;
+    html += `<div style="font-size:11px;color:#8899aa;margin-top:2px">Path: ${pathHex(p)}</div>`;
 
     // Per-hop detail
     html += `<table style="margin-top:4px">`;
     for (const e of p.edges) {
         const fn = topo.nodes[e.from], tn = topo.nodes[e.to];
-        html += `<tr><td>${escHtml(fn?fn.name:e.from)}</td><td>→</td><td class="${snrClass(e.snr_db)}">${e.snr_db>=0?'+':''}${e.snr_db.toFixed(1)} dB</td></tr>`;
+        html += `<tr><td>${escHtml(fn?fn.name:e.from)} [${e.from.substring(0,4)}]</td><td>→</td><td class="${snrClass(e.snr_db)}">${fmtSnr(e.snr_db)} dB</td></tr>`;
     }
     html += `</table>`;
 
     // Alternatives
     for (let i = 1; i < fwd.length; i++) {
         const a = fwd[i];
-        html += `<div class="path-alt" style="margin-top:4px">Alt ${i+1}: ${a.path_names.map(escHtml).join(' → ')} (${a.bottleneck_snr>=0?'+':''}${a.bottleneck_snr.toFixed(1)} dB)</div>`;
+        html += `<div class="path-alt" style="margin-top:6px">Alt ${i+1}: ${pathLine(a)} (${fmtSnr(a.bottleneck_snr)} dB)</div>`;
+        html += `<div style="font-size:11px;color:#666">Path: ${pathHex(a)}</div>`;
     }
 
     // Reverse
     if (rev.length > 0) {
         const r = rev[0];
-        html += `<div class="reverse" style="margin-top:4px">Reverse: ${r.path_names.map(escHtml).join(' → ')} (${r.bottleneck_snr>=0?'+':''}${r.bottleneck_snr.toFixed(1)} dB)</div>`;
+        html += `<div class="reverse" style="margin-top:6px">Reverse: ${pathLine(r)} (${fmtSnr(r.bottleneck_snr)} dB)</div>`;
+        html += `<div style="font-size:11px;color:#666">Path: ${pathHex(r)}</div>`;
     }
 
     if (data.health_aware) html += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
@@ -1801,6 +1823,9 @@ def main():
             with open(args.config) as f:
                 cfg = json.load(f)
             companion = cfg.get("companion_prefix", "")
+            # Apply health penalty weights from config
+            from meshcore_topology import set_health_weights
+            set_health_weights(cfg.get("health_penalties"))
         except Exception:
             pass
 
