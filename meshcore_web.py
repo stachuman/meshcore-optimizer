@@ -1558,8 +1558,8 @@ function renderPaths(data) {
     for (let i = 0; i < rev.length; i++)
         allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
 
-    // Draw selected path on map (default: primary)
-    showPathOnMap(allPaths[0].pr, allPaths[0].color);
+    // Draw all paths on map, primary highlighted
+    showAllPathsOnMap(allPaths, 0);
 
     // Build result panel with radio buttons
     let html = '<div style="margin-bottom:6px">';
@@ -1606,42 +1606,54 @@ function onPathChoice(idx) {
         allPaths.push({ label: i===0 ? 'Reverse' : `Rev alt ${i+1}`, pr: rev[i], color: '#ff66aa' });
 
     if (idx >= allPaths.length) return;
-    const ap = allPaths[idx];
 
-    showPathOnMap(ap.pr, ap.color);
+    // Redraw all paths, selected one highlighted
+    showAllPathsOnMap(allPaths, idx);
 
     // Update detail section (keep radio buttons, replace detail below)
     const resultEl = document.getElementById('path-result');
     const detailStart = resultEl.innerHTML.indexOf('<div class="path-primary">');
     if (detailStart > 0) {
         const radioHtml = resultEl.innerHTML.substring(0, detailStart);
-        let detail = pathDetailHtml(ap.pr);
+        let detail = pathDetailHtml(allPaths[idx].pr);
         if (_lastPathData.health_aware) detail += `<div style="margin-top:4px;color:#ff9800">🏥 Health penalties applied</div>`;
         resultEl.innerHTML = radioHtml + detail;
     }
 }
 
-function showPathOnMap(pr, color) {
-    // Clear old path lines
+function showAllPathsOnMap(allPaths, selectedIdx) {
+    // Clear old
     pathLines.forEach(l => map.removeLayer(l));
     pathLines = [];
-    // Reset node styles
-    if (topo) {
-        for (const [pfx, node] of Object.entries(topo.nodes)) {
-            const m = markers[pfx]; if (!m) continue;
-            const isC = pfx === companionPrefix;
-            const pen = node.health_penalty || 0;
-            let col = '#888';
-            if (node.status && Object.keys(node.status).length) col = healthColor(pen);
-            if (isC) col = '#0088ff';
-            m.setStyle({ weight: isC?3:2, color: isC?'#00d4ff':(node._estimated?'#999':col),
-                          fillOpacity: 0.9, dashArray: node._estimated?'3,3':null });
-            m.setRadius(isC ? 10 : 7);
-        }
+    resetNodeStyles();
+
+    // Draw non-selected paths first (thin, behind)
+    for (let i = allPaths.length - 1; i >= 0; i--) {
+        if (i === selectedIdx) continue;
+        const ap = allPaths[i];
+        drawPathLine(ap.pr, ap.color, 2, '6,4', 0.4);
     }
-    // Draw selected path
-    drawPathLine(pr, color, 5, null, 0.9);
-    for (const pfx of pr.path) highlightNode(pfx, true);
+    // Draw selected path on top (thick, solid)
+    const sel = allPaths[selectedIdx];
+    drawPathLine(sel.pr, sel.color, 5, null, 0.9);
+
+    // Highlight nodes of selected path
+    for (const pfx of sel.pr.path) highlightNode(pfx, true);
+}
+
+function resetNodeStyles() {
+    if (!topo) return;
+    for (const [pfx, node] of Object.entries(topo.nodes)) {
+        const m = markers[pfx]; if (!m) continue;
+        const isC = pfx === companionPrefix;
+        const pen = node.health_penalty || 0;
+        let col = '#888';
+        if (node.status && Object.keys(node.status).length) col = healthColor(pen);
+        if (isC) col = '#0088ff';
+        m.setStyle({ weight: isC?3:2, color: isC?'#00d4ff':(node._estimated?'#999':col),
+                      fillOpacity: 0.9, dashArray: node._estimated?'3,3':null });
+        m.setRadius(isC ? 10 : 7);
+    }
 }
 
 function drawPathLine(pathResult, color, weight, dashArray, opacity) {
@@ -1678,21 +1690,10 @@ function highlightNode(pfx, on) {
 
 function clearPath() {
     pathFrom = null; pathTo = null;
+    _lastPathData = null;
     pathLines.forEach(l => map.removeLayer(l));
     pathLines = [];
-    if (topo) {
-        for (const [pfx, node] of Object.entries(topo.nodes)) {
-            const m = markers[pfx]; if (!m) continue;
-            const isC = pfx === companionPrefix;
-            const pen = node.health_penalty || 0;
-            let col = '#888';
-            if (node.status && Object.keys(node.status).length) col = healthColor(pen);
-            if (isC) col = '#0088ff';
-            m.setStyle({ weight: isC?3:2, color: isC?'#00d4ff':(node._estimated?'#999':col),
-                          fillOpacity: 0.9, dashArray: node._estimated?'3,3':null });
-            m.setRadius(isC ? 10 : 7);
-        }
-    }
+    resetNodeStyles();
     document.getElementById('path-result').innerHTML = '';
     document.getElementById('selFrom').value = '';
     document.getElementById('selTo').value = '';
