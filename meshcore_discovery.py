@@ -1012,9 +1012,16 @@ async def _run_trace_phase(ctx: _DiscoveryCtx):
 
             await ctx.set_contact_path(contact, path_result)
 
+            # Build forced trace from this specific path so alternatives
+            # actually trace through different intermediates
+            ADDR_HEX = HOP_HEX_LEN
+            hops = [p[:ADDR_HEX].lower() for p in path_result.path]
+            trace_addrs = hops + list(reversed(hops[:-1]))
+            forced = ",".join(trace_addrs)
+
             ok, t_edges, err = await _trace_repeater(
                 ctx.mc, contact, ctx.companion_prefix, best_prefix,
-                ctx.graph, ctx.timeout)
+                ctx.graph, ctx.timeout, forced_trace_path=forced)
 
             if ok and t_edges > 0:
                 print(f"    +{t_edges} trace edges")
