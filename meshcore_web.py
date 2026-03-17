@@ -303,6 +303,22 @@ class NodeCommander:
                     _close_loop(loop)
                 return
 
+            # Handle disc_path action
+            if action == "disc_path":
+                target = target_prefix.upper()
+                node = graph.get_node(target)
+                print(f"  === DISC_PATH: "
+                      f"{node.name if node else target} ===")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    self.result = loop.run_until_complete(
+                        self._async_disc_path(config, graph,
+                                              target, topology_file))
+                finally:
+                    _close_loop(loop)
+                return
+
             target = target_prefix.upper()
 
             node = graph.get_node(target)
@@ -429,6 +445,225 @@ class NodeCommander:
                 "graph_nodes": s["nodes"],
                 "graph_edges": s["edges"],
             }
+        finally:
+            await mc.disconnect()
+
+    async def _async_disc_path(self, config, graph, target_prefix,
+                               topology_file):
+        """Send disc_path flood and return firmware's route with analysis."""
+        from meshcore_discovery import (
+            connect_radio, find_contact, _decode_path_hops, _resolve_hop,
+            _trace_repeater,
+        )
+        from meshcore_topology import widest_path
+        from meshcore import EventType
+
+        node = graph.get_node(target_prefix)
+        if not node:
+            return {"ok": False, "error": f"Node {target_prefix} not found"}
+
+        mc = await connect_radio(config.radio)
+        try:
+            await mc.ensure_contacts(follow=True)
+            contact = find_contact(mc, node.prefix)
+            if not contact:
+                return {"ok": False, "error": f"No contact for {node.name}"}
+
+            path_queue = asyncio.Queue()
+            def _on_path(event):
+                path_queue.put_nowait(event)
+            sub = mc.subscribe(EventType.PATH_RESPONSE, _on_path)
+
+            try:
+                print(f"  TX: disc_path to {node.name} [{node.prefix[:4]}]...")
+                res = await asyncio.wait_for(
+                    mc.commands.send_path_discovery(contact),
+                    timeout=config.discovery_timeout)
+
+                if res is None or res.type == EventType.ERROR:
+                    sub.unsubscribe()
+                    print(f"  TX: disc_path send failed")
+                    return {"ok": False, "error": "disc_path send failed"}
+
+                print(f"  Waiting for response "
+                      f"(timeout={config.discovery_timeout}s)...")
+                try:
+                    ev = await asyncio.wait_for(
+                        path_queue.get(),
+                        timeout=config.discovery_timeout)
+                except asyncio.TimeoutError:
+                    print(f"  RX: No response (timeout)")
+                    return {"ok": False, "error": "No response (timeout)"}
+                finally:
+                    sub.unsubscribe()
+
+                # Decode firmware path
+                out_path = ev.payload.get("out_path", "")
+                in_path = ev.payload.get("in_path", "")
+                out_hlen = ev.payload.get("out_path_hash_len", 1)
+                in_hlen = ev.payload.get("in_path_hash_len", 1)
+
+                out_hops = _decode_path_hops(out_path, out_hlen)
+                in_hops = _decode_path_hops(in_path, in_hlen)
+                out_resolved = [_resolve_hop(h, graph) for h in out_hops]
+                in_resolved = [_resolve_hop(h, graph) for h in in_hops]
+
+                comp_node = graph.get_node(config.companion_prefix)
+                companion = comp_node.prefix if comp_node else config.companion_prefix
+
+                # Build full paths: companion → hops → target
+                # Deduplicate: firmware hops may include companion or target
+                def build_fw_path(hop_list, resolved_list):
+                    middle = [r for r in resolved_list
+                              if r and r != companion and r != node.prefix]
+                    full = [companion] + middle + [node.prefix]
+                    # Remove consecutive duplicates (hash collisions)
+                    deduped = [full[0]]
+                    for p in full[1:]:
+                        if p != deduped[-1]:
+                            deduped.append(p)
+                    full = deduped
+                    names = []
+                    path_prefixes = []
+                    bottleneck = None
+                    missing_edges = []
+
+                    for pfx in full:
+                        n = graph.nodes.get(pfx)
+                        names.append(n.name if n else f"[{pfx[:4]}]")
+                        path_prefixes.append(pfx)
+
+                    for i in range(len(full) - 1):
+                        a, b = full[i], full[i + 1]
+                        if not a or not b or a == b:
+                            continue
+                        edge = graph.get_edge(a, b)
+                        rev = graph.get_edge(b, a)
+                        if edge:
+                            snr = edge.snr_db
+                            if bottleneck is None or snr < bottleneck:
+                                bottleneck = snr
+                        elif rev:
+                            snr = rev.snr_db - 2.0
+                            if bottleneck is None or snr < bottleneck:
+                                bottleneck = snr
+                        else:
+                            missing_edges.append({
+                                "from": a, "to": b,
+                                "from_name": graph.nodes[a].name if a in graph.nodes else a[:4],
+                                "to_name": graph.nodes[b].name if b in graph.nodes else b[:4],
+                            })
+
+                    return {
+                        "path": path_prefixes,
+                        "path_names": names,
+                        "hop_count": len(full) - 1,
+                        "bottleneck_snr": round(bottleneck, 2) if bottleneck is not None else None,
+                        "missing_edges": missing_edges,
+                    }
+
+                result = {"ok": True, "node": node.prefix, "name": node.name}
+
+                if out_hops or not out_path:
+                    out_info = build_fw_path(out_hops, out_resolved)
+                    is_direct = not out_path
+                    if is_direct:
+                        out_info = {"path": [companion, node.prefix],
+                                    "path_names": [comp_node.name if comp_node else companion[:4], node.name],
+                                    "hop_count": 1, "bottleneck_snr": None, "missing_edges": []}
+                        e = graph.get_edge(companion, node.prefix)
+                        if e:
+                            out_info["bottleneck_snr"] = round(e.snr_db, 2)
+                    result["out_path"] = out_info
+                    label = "direct" if is_direct else " -> ".join(out_info["path_names"])
+                    print(f"  RX out: {label}")
+
+                if in_hops or not in_path:
+                    in_info = build_fw_path(in_hops, in_resolved)
+                    is_direct = not in_path
+                    if is_direct:
+                        in_info = {"path": [node.prefix, companion],
+                                   "path_names": [node.name, comp_node.name if comp_node else companion[:4]],
+                                   "hop_count": 1, "bottleneck_snr": None, "missing_edges": []}
+                        e = graph.get_edge(node.prefix, companion)
+                        if e:
+                            in_info["bottleneck_snr"] = round(e.snr_db, 2)
+                    result["in_path"] = in_info
+                    label = "direct" if is_direct else " -> ".join(in_info["path_names"])
+                    print(f"  RX in:  {label}")
+
+                # Collect all missing edge pairs
+                all_missing = set()
+                for key in ("out_path", "in_path"):
+                    for me in result.get(key, {}).get("missing_edges", []):
+                        pair = tuple(sorted([me["from"], me["to"]]))
+                        all_missing.add(pair)
+
+                if all_missing:
+                    print(f"  Missing edges: {len(all_missing)} — probing...")
+                    probed = 0
+                    for pa, pb in all_missing:
+                        na = graph.nodes.get(pa)
+                        nb = graph.nodes.get(pb)
+                        if not na or not nb:
+                            continue
+                        print(f"    Probe: {na.name} [{pa[:4]}] "
+                              f"↔ {nb.name} [{pb[:4]}]")
+
+                        hp = config.discovery_hop_penalty
+                        path_to_a = widest_path(
+                            graph, companion, pa, hop_penalty=hp)
+                        if not path_to_a.found:
+                            path_to_b = widest_path(
+                                graph, companion, pb, hop_penalty=hp)
+                            if not path_to_b.found:
+                                print(f"      Neither reachable")
+                                continue
+                            path_to_a = path_to_b
+                            pa, pb = pb, pa
+
+                        # Skip if path to via is too long
+                        if path_to_a.hop_count > 4:
+                            print(f"      Path too long ({path_to_a.hop_count}h)")
+                            continue
+
+                        ADDR_HEX = 4
+                        via_hops = [p[:ADDR_HEX].lower()
+                                    for p in path_to_a.path]
+                        target_hop = pb[:ADDR_HEX].lower()
+                        fwd = via_hops + [target_hop]
+                        trace_addrs = fwd + list(reversed(fwd[:-1]))
+                        forced = ",".join(trace_addrs)
+
+                        probe_ct = (find_contact(mc, pb) or
+                                    find_contact(mc, pa))
+                        if not probe_ct:
+                            continue
+
+                        ok_t, t_edges, err_t = await _trace_repeater(
+                            mc, probe_ct, companion, pb,
+                            graph, config.discovery_timeout,
+                            forced_trace_path=forced)
+
+                        if ok_t and t_edges > 0:
+                            print(f"      +{t_edges} edges!")
+                            graph.infer_reverse_edges(
+                                config.discovery_infer_penalty)
+                            graph.save(topology_file)
+                            probed += t_edges
+                        elif err_t:
+                            print(f"      {err_t}")
+
+                        await asyncio.sleep(2)
+
+                    result["edges_probed"] = probed
+
+                return result
+
+            except Exception as e:
+                sub.unsubscribe()
+                return {"ok": False, "error": str(e)}
+
         finally:
             await mc.disconnect()
 
@@ -644,6 +879,8 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             self._handle_node_command()
         elif path == "/api/trace":
             self._handle_trace()
+        elif path == "/api/path/firmware":
+            self._handle_firmware_path()
         else:
             self.send_error(404)
 
@@ -740,6 +977,18 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             return
         ok, msg = _commander.start(
             "trace", trace_path,
+            self.config_file, self.topology_file,
+        )
+        self._send_json({"ok": ok, "message": msg})
+
+    def _handle_firmware_path(self):
+        body = self._read_post_body()
+        target = body.get("prefix", "").strip()
+        if not target:
+            self._send_json({"ok": False, "error": "prefix required"}, 400)
+            return
+        ok, msg = _commander.start(
+            "disc_path", target,
             self.config_file, self.topology_file,
         )
         self._send_json({"ok": ok, "message": msg})
@@ -1195,6 +1444,7 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
         <div class="panel-row">
             <label><input type="checkbox" id="chkHealth"> Health-aware</label>
             <button onclick="panelFindPath()" style="margin-left:auto">Find</button>
+            <button onclick="askFirmwarePath()">FW Route</button>
             <button onclick="clearPath()">Clear</button>
         </div>
     </div>
@@ -1719,6 +1969,119 @@ async function sendTrace() {
     }
 }
 
+async function askFirmwarePath() {
+    const to = document.getElementById('selTo').value;
+    if (!to) {
+        document.getElementById('path-result').innerHTML =
+            `<span style="color:#f44336">Select destination node</span>`;
+        return;
+    }
+    const resultEl = document.getElementById('path-result');
+    const existing = resultEl.innerHTML;
+    resultEl.innerHTML = existing +
+        `<div style="margin-top:8px;color:#ff9800">Asking firmware for route...</div>`;
+
+    startDiscPoll();
+    try {
+        const resp = await fetch('/api/path/firmware', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ prefix: to }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+            appendFwResult(existing, `<span style="color:#f44336">FW: ${data.message || data.error}</span>`);
+            return;
+        }
+        _pollFwResult(existing);
+    } catch (e) {
+        appendFwResult(existing, `<span style="color:#f44336">FW error: ${e}</span>`);
+    }
+}
+
+function _pollFwResult(existingHtml) {
+    const poll = setInterval(async () => {
+        try {
+            const r = await fetch('/api/node/result');
+            const d = await r.json();
+            if (d.busy) return;
+            clearInterval(poll);
+            if (d.ok) {
+                let html = '<div style="margin-top:8px;border-top:1px solid #0f3460;padding-top:6px">';
+                html += '<b style="color:#ff9800">Firmware Route</b><br>';
+
+                // Out path
+                if (d.out_path) {
+                    const op = d.out_path;
+                    const snr = op.bottleneck_snr !== null ? ` (${fmtSnr(op.bottleneck_snr)} dB)` : ' (SNR unknown)';
+                    html += `<div>Out: ${op.path_names.map(escHtml).join(' → ')}${snr}</div>`;
+                    if (op.missing_edges && op.missing_edges.length) {
+                        for (const me of op.missing_edges) {
+                            html += `<div style="color:#f44336;font-size:11px">  Missing: ${escHtml(me.from_name)} ↔ ${escHtml(me.to_name)}</div>`;
+                        }
+                    }
+                }
+                // In path
+                if (d.in_path) {
+                    const ip = d.in_path;
+                    const snr = ip.bottleneck_snr !== null ? ` (${fmtSnr(ip.bottleneck_snr)} dB)` : ' (SNR unknown)';
+                    html += `<div>In: ${ip.path_names.map(escHtml).join(' → ')}${snr}</div>`;
+                    if (ip.missing_edges && ip.missing_edges.length) {
+                        for (const me of ip.missing_edges) {
+                            html += `<div style="color:#f44336;font-size:11px">  Missing: ${escHtml(me.from_name)} ↔ ${escHtml(me.to_name)}</div>`;
+                        }
+                    }
+                }
+
+                // Draw firmware paths on map
+                function drawFwPath(fwp, color) {
+                    if (!fwp || !fwp.path || !topo) return;
+                    const coords = [];
+                    for (const pfx of fwp.path) {
+                        // Try exact match, then prefix match
+                        let n = topo.nodes[pfx];
+                        if (!n) {
+                            for (const [k, v] of Object.entries(topo.nodes)) {
+                                if (k.startsWith(pfx) || pfx.startsWith(k)) { n = v; break; }
+                            }
+                        }
+                        if (n && n._lat) coords.push([n._lat, n._lon]);
+                    }
+                    if (coords.length >= 2) {
+                        const line = L.polyline(coords, {
+                            color, weight: 3, opacity: 0.7,
+                            dashArray: '4,6', lineCap: 'round',
+                        });
+                        line.addTo(map);
+                        pathLines.push(line);
+                    }
+                }
+                drawFwPath(d.out_path, '#ff9800');
+                drawFwPath(d.in_path, '#ff6600');
+
+                if (d.edges_probed > 0) {
+                    html += `<div style="color:#4caf50">+${d.edges_probed} edges discovered and added!</div>`;
+                    refreshTopology();
+                }
+
+                html += '</div>';
+                appendFwResult(existingHtml, html);
+            } else {
+                appendFwResult(existingHtml, `<div style="margin-top:6px;color:#f44336">FW: ${d.error}</div>`);
+            }
+        } catch (e) {
+            clearInterval(poll);
+        }
+    }, 2000);
+}
+
+function appendFwResult(existingHtml, fwHtml) {
+    const el = document.getElementById('path-result');
+    // Remove any "Asking firmware..." message
+    const cleaned = el.innerHTML.replace(/<div[^>]*>Asking firmware[^<]*<\/div>/, '');
+    el.innerHTML = cleaned + fwHtml;
+}
+
 function panelFindPath() {
     const from = document.getElementById('selFrom').value;
     const to = document.getElementById('selTo').value;
@@ -1803,9 +2166,21 @@ function renderPaths(data) {
     document.getElementById('path-result').innerHTML = radioHtml + detailHtml;
 }
 
+function pathRoundTrip(pr) {
+    const hops = pr.path.map(p => p.substring(0,4).toLowerCase());
+    const rt = hops.concat(hops.slice(0,-1).reverse());
+    return rt.join(',');
+}
+
 function pathDetailHtml(pr) {
+    const hex = pathHex(pr);
+    const rt = pathRoundTrip(pr);
     let html = `<div class="path-primary">${pathLine(pr)}</div>`;
-    html += `<div style="font-size:11px;color:#8899aa;margin-top:2px">Path: ${pathHex(pr)}</div>`;
+    html += `<div style="font-size:11px;color:#8899aa;margin-top:2px">`;
+    html += `Path: ${hex}`;
+    html += ` <a class="btn" style="font-size:10px;padding:1px 6px" onclick="copyToTrace('${rt}')">Trace</a>`;
+    html += ` <a class="btn" style="font-size:10px;padding:1px 6px" onclick="copyToClipboard('${rt}')">Copy</a>`;
+    html += `</div>`;
     html += `<table style="margin-top:4px">`;
     for (const e of pr.edges) {
         const fn = topo.nodes[e.from];
@@ -1813,6 +2188,21 @@ function pathDetailHtml(pr) {
     }
     html += `</table>`;
     return html;
+}
+
+function copyToTrace(rt) {
+    document.getElementById('traceInput').value = rt;
+    document.getElementById('traceInput').dispatchEvent(new Event('input'));
+}
+
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {}, () => {
+        // Fallback for non-HTTPS
+        const ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.select();
+        document.execCommand('copy'); document.body.removeChild(ta);
+    });
 }
 
 function onPathChoice(idx) {

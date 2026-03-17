@@ -866,7 +866,8 @@ def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
                 excluded.add(p)
         else:
             # Direct 1-hop path — block the edge to find multi-hop routes
-            blocked_edges.add((pr.path[0], pr.path[1]))
+            if len(pr.path) >= 2:
+                blocked_edges.add((pr.path[0], pr.path[1]))
 
     return results
 
