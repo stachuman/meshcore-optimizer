@@ -960,12 +960,23 @@ async def _run_trace_phase(ctx: _DiscoveryCtx):
                 unreachable += 1
                 continue
 
-            # Skip if all edges along the path are already measured
-            all_measured = all(
-                e.source in ("neighbors", "trace") for e in pr.edges)
-            if all_measured and pr.edges:
-                ctx.ds.traced_set.add(prefix)
-                continue
+            # Skip if all edges along the path already have data:
+            # - measured (neighbors/trace), OR
+            # - inferred but the reverse direction is measured
+            #   (we know both directions, just one is estimated)
+            if pr.edges:
+                all_known = True
+                for e in pr.edges:
+                    if e.source in ("neighbors", "trace"):
+                        continue
+                    rev = ctx.graph.get_edge(e.to_prefix, e.from_prefix)
+                    if rev and rev.source in ("neighbors", "trace"):
+                        continue
+                    all_known = False
+                    break
+                if all_known:
+                    ctx.ds.traced_set.add(prefix)
+                    continue
 
             score = _effective_snr(pr)
             if score > best_score:
