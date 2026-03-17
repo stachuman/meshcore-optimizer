@@ -1209,19 +1209,64 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
             except Exception:
                 break
 
-        print(f"    Trace path: {trace_path}")
-        ok, t_edges, err = await _trace_repeater(
-            ctx.mc, contact, ctx.companion_prefix,
-            target_node.prefix, ctx.graph, ctx.timeout,
-            forced_trace_path=trace_path)
+        # Try up to 2 attempts from the primary direction,
+        # then try the reverse direction if both fail
+        MAX_ATTEMPTS = 2
+        found = False
 
-        if ok and t_edges > 0:
-            print(f"    +{t_edges} edges from proximity probe")
-            ctx.graph.infer_reverse_edges(ctx.infer_penalty)
-            ctx.fix_names()
-            ctx.save()
-        elif err:
-            print(f"    {err}")
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            print(f"    Attempt {attempt}/{MAX_ATTEMPTS}: "
+                  f"via {via_node.name} [{via_node.prefix[:4]}]")
+            print(f"    Trace: {trace_path}")
+            ok, t_edges, err = await _trace_repeater(
+                ctx.mc, contact, ctx.companion_prefix,
+                target_node.prefix, ctx.graph, ctx.timeout,
+                forced_trace_path=trace_path)
+
+            if ok and t_edges > 0:
+                print(f"    +{t_edges} edges from proximity probe")
+                ctx.graph.infer_reverse_edges(ctx.infer_penalty)
+                ctx.fix_names()
+                ctx.save()
+                found = True
+                break
+            elif err:
+                print(f"    {err}")
+            if attempt < MAX_ATTEMPTS:
+                await asyncio.sleep(ctx.delay)
+
+        # If primary direction failed, try reverse (B → A instead of A → B)
+        if not found and path_a.found and path_b.found:
+            # Swap: route through the other node
+            rev_via = target_node
+            rev_target = via_node
+            rev_path = path_b if via_node == node_a else path_a
+
+            rev_hops = [p[:ADDR_HEX].lower() for p in rev_path.path]
+            rev_target_hop = rev_target.prefix[:ADDR_HEX].lower()
+            rev_fwd = rev_hops + [rev_target_hop]
+            rev_addrs = rev_fwd + list(reversed(rev_fwd[:-1]))
+            rev_trace = ",".join(rev_addrs)
+
+            rev_contact = (ctx.contact_map.get(rev_target.prefix) or
+                           ctx.contact_map.get(rev_via.prefix))
+            if rev_contact:
+                print(f"    Reverse: via {rev_via.name} "
+                      f"[{rev_via.prefix[:4]}]")
+                print(f"    Trace: {rev_trace}")
+                ok, t_edges, err = await _trace_repeater(
+                    ctx.mc, rev_contact, ctx.companion_prefix,
+                    rev_target.prefix, ctx.graph, ctx.timeout,
+                    forced_trace_path=rev_trace)
+
+                if ok and t_edges > 0:
+                    print(f"    +{t_edges} edges from reverse probe")
+                    ctx.graph.infer_reverse_edges(ctx.infer_penalty)
+                    ctx.fix_names()
+                    ctx.save()
+                    found = True
+                elif err:
+                    print(f"    {err}")
 
         probe_count += 1
         await asyncio.sleep(ctx.delay)
