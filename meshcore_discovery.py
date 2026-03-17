@@ -1023,11 +1023,14 @@ async def _run_trace_phase(ctx: _DiscoveryCtx):
                 ctx.mc, contact, ctx.companion_prefix, best_prefix,
                 ctx.graph, ctx.timeout, forced_trace_path=forced)
 
-            if ok and t_edges > 0:
-                print(f"    +{t_edges} trace edges")
-                ctx.graph.infer_reverse_edges(ctx.infer_penalty)
-                ctx.fix_names()
-                ctx.save()
+            if ok:
+                if t_edges > 0:
+                    print(f"    +{t_edges} trace edges")
+                    ctx.graph.infer_reverse_edges(ctx.infer_penalty)
+                    ctx.fix_names()
+                    ctx.save()
+                else:
+                    print(f"    Trace OK (no new edges)")
                 for p in path_result.path[1:-1]:
                     intermediate_fails.pop(p, None)
                 break
@@ -1290,12 +1293,17 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
                     print(f"    {err}")
 
         # If all trace attempts failed, try flood discovery as fallback
+        # Try both nodes — firmware may know routes we don't
         if not found:
             print(f"    Traces failed — trying flood discovery")
-            edges = await _flood_probe_node(
-                ctx, target_node.prefix, label="fallback")
-            if edges > 0:
-                found = True
+            for flood_node in [target_node, via_node]:
+                if ctx.contact_map.get(flood_node.prefix):
+                    edges = await _flood_probe_node(
+                        ctx, flood_node.prefix, label="fallback")
+                    if edges > 0:
+                        found = True
+                        break
+                    await asyncio.sleep(ctx.delay)
 
         probe_count += 1
         await asyncio.sleep(ctx.delay)
