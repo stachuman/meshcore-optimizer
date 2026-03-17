@@ -260,7 +260,7 @@ class NodeCommander:
     def _run_thread(self, action, target_prefix, config_file, topology_file):
         from meshcore_discovery import (
             load_config, Config, connect_radio,
-            match_passwords, _login_and_neighbors,
+            match_passwords, _login_and_neighbors, _trace_repeater,
         )
         from meshcore_topology import NetworkGraph, widest_path
 
@@ -276,6 +276,24 @@ class NodeCommander:
             graph = NetworkGraph()
             if os.path.exists(topology_file):
                 graph = NetworkGraph.load(topology_file)
+
+            # Handle trace action separately -- target_prefix is the path
+            if action == "trace":
+                print(f"  === TRACE: {target_prefix} ===")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    self.result = loop.run_until_complete(
+                        self._async_trace(config, graph,
+                                          target_prefix, topology_file))
+                finally:
+                    pending = asyncio.all_tasks(loop)
+                    if pending:
+                        loop.run_until_complete(
+                            asyncio.gather(*pending,
+                                           return_exceptions=True))
+                    loop.close()
+                return
 
             target = target_prefix.upper()
 
@@ -345,6 +363,69 @@ class NodeCommander:
             else:
                 return await self._do_neighbors(
                     mc, contact, node, pw_list, config, graph, topology_file)
+        finally:
+            await mc.disconnect()
+
+    async def _async_trace(self, config, graph, trace_path, topology_file):
+        """Send a manual trace and return results."""
+        from meshcore_discovery import connect_radio, _trace_repeater
+
+        comp_node = graph.get_node(config.companion_prefix)
+        companion = comp_node.prefix if comp_node else config.companion_prefix
+
+        # Resolve hop names for display
+        hops = trace_path.split(",")
+        hop_names = []
+        for h in hops:
+            resolved = None
+            for pfx, n in graph.nodes.items():
+                if pfx[:len(h)].lower() == h.lower():
+                    resolved = n.name
+                    break
+            hop_names.append(f"{resolved or '?'} [{h}]")
+        print(f"  Path: {' -> '.join(hop_names)}")
+
+        mc = await connect_radio(config.radio)
+        try:
+            await mc.ensure_contacts(follow=True)
+
+            # Use the first hop's contact (companion)
+            contact = None
+            for pub_key, ct in mc.contacts.items():
+                if isinstance(ct, dict):
+                    contact = ct
+                    break
+
+            if not contact:
+                return {"ok": False, "error": "No contacts available"}
+
+            # Determine target (last unique hop before return)
+            target_hop = hops[len(hops) // 2] if len(hops) > 1 else hops[0]
+            target_pfx = None
+            for pfx in graph.nodes:
+                if pfx[:len(target_hop)].lower() == target_hop.lower():
+                    target_pfx = pfx
+                    break
+            target_pfx = target_pfx or target_hop.upper()
+
+            edges_before = graph.stats()['edges']
+            ok, t_edges, err = await _trace_repeater(
+                mc, contact, companion, target_pfx,
+                graph, config.discovery_timeout,
+                forced_trace_path=trace_path)
+
+            if ok and t_edges > 0:
+                graph.infer_reverse_edges(config.discovery_infer_penalty)
+                graph.save(topology_file)
+
+            s = graph.stats()
+            return {
+                "ok": ok,
+                "edges_added": t_edges,
+                "error": err or "",
+                "graph_nodes": s["nodes"],
+                "graph_edges": s["edges"],
+            }
         finally:
             await mc.disconnect()
 
@@ -558,6 +639,8 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             self._handle_radio_test()
         elif path == "/api/node/command":
             self._handle_node_command()
+        elif path == "/api/trace":
+            self._handle_trace()
         else:
             self.send_error(404)
 
@@ -642,6 +725,18 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             return
         ok, msg = _commander.start(
             action, target,
+            self.config_file, self.topology_file,
+        )
+        self._send_json({"ok": ok, "message": msg})
+
+    def _handle_trace(self):
+        body = self._read_post_body()
+        trace_path = body.get("path", "").strip()
+        if not trace_path:
+            self._send_json({"ok": False, "error": "path required"}, 400)
+            return
+        ok, msg = _commander.start(
+            "trace", trace_path,
             self.config_file, self.topology_file,
         )
         self._send_json({"ok": ok, "message": msg})
@@ -1097,6 +1192,18 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
     </div>
     <div id="path-result"></div>
 
+    <!-- Manual Trace -->
+    <div class="panel-section">
+        <h3>Trace Path</h3>
+        <input id="traceInput" type="text" placeholder="e.g. 5364,ee9f,bb57,41a1,bb57,ee9f,5364"
+               style="font-family:monospace;font-size:12px">
+        <div class="panel-row" style="margin-top:4px">
+            <span id="tracePreview" style="font-size:11px;color:#8899aa;flex:1"></span>
+            <button onclick="sendTrace()">Send</button>
+        </div>
+        <div id="traceResult" style="font-size:12px;margin-top:4px"></div>
+    </div>
+
     <!-- Discovery -->
     <div class="panel-section">
         <h3>Discovery</h3>
@@ -1114,7 +1221,7 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
 
 <script>
 // --- State ---
-let map, topo = null, markers = {}, edgeLines = [], pathLines = [];
+let map, topo = null, markers = {}, edgeLines = [], pathLines = [], traceLines = [];
 let firstLoad = true;
 let pathFrom = null, pathTo = null;
 let companionPrefix = '';
@@ -1506,6 +1613,104 @@ function _pollNodeResult(action, pfx, statusEl) {
     }, 2000);
 }
 
+// --- Manual Trace ---
+function clearTraceLines() {
+    traceLines.forEach(l => map.removeLayer(l));
+    traceLines = [];
+}
+
+function resolveHop(h) {
+    if (!topo) return null;
+    h = h.toLowerCase();
+    for (const [pfx, n] of Object.entries(topo.nodes)) {
+        if (pfx.toLowerCase().startsWith(h)) return { pfx, node: n };
+    }
+    return null;
+}
+
+document.getElementById('traceInput').addEventListener('input', function() {
+    const val = this.value.trim();
+    clearTraceLines();
+    if (!val || !topo) { document.getElementById('tracePreview').textContent = ''; return; }
+
+    const hops = val.split(',').map(h => h.trim());
+    const resolved = hops.map(resolveHop);
+    const names = resolved.map((r, i) => r ? r.node.name : '?');
+    document.getElementById('tracePreview').textContent = names.join(' → ');
+
+    // Draw on map — only forward half (before return trip)
+    const mid = Math.ceil(hops.length / 2);
+    const fwdResolved = resolved.slice(0, mid);
+    const coords = [];
+    for (const r of fwdResolved) {
+        if (r && r.node._lat) coords.push([r.node._lat, r.node._lon]);
+    }
+    if (coords.length >= 2) {
+        const line = L.polyline(coords, {
+            color: '#e040fb', weight: 4, opacity: 0.7,
+            dashArray: '8,6', lineCap: 'round',
+        });
+        line.addTo(map);
+        traceLines.push(line);
+
+        // Mark each hop with its short hash
+        for (let i = 0; i < fwdResolved.length; i++) {
+            const r = fwdResolved[i];
+            if (!r || !r.node._lat) continue;
+            const label = L.marker([r.node._lat, r.node._lon], {
+                icon: L.divIcon({
+                    className: '',
+                    html: `<div style="background:#e040fb;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;white-space:nowrap;transform:translate(-50%,-150%)">${hops[i]}</div>`,
+                    iconSize: [0,0],
+                }), interactive: false,
+            });
+            label.addTo(map);
+            traceLines.push(label);
+        }
+    }
+});
+
+async function sendTrace() {
+    const path = document.getElementById('traceInput').value.trim();
+    if (!path) return;
+    const resultEl = document.getElementById('traceResult');
+    resultEl.innerHTML = '<span style="color:#ff9800">Sending...</span>';
+
+    startDiscPoll();
+    try {
+        const resp = await fetch('/api/trace', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ path }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+            resultEl.innerHTML = `<span style="color:#f44336">${data.message || data.error}</span>`;
+            return;
+        }
+        // Poll for result
+        const poll = setInterval(async () => {
+            try {
+                const r = await fetch('/api/node/result');
+                const d = await r.json();
+                if (d.busy) return;
+                clearInterval(poll);
+                if (d.ok) {
+                    const msg = d.edges_added > 0
+                        ? `<span style="color:#4caf50">+${d.edges_added} edges</span>`
+                        : `<span style="color:#8899aa">No new edges</span>`;
+                    resultEl.innerHTML = msg + (d.error ? ` <span style="color:#ff9800">(${d.error})</span>` : '');
+                    if (d.edges_added > 0) refreshTopology();
+                } else {
+                    resultEl.innerHTML = `<span style="color:#f44336">${d.error || 'failed'}</span>`;
+                }
+            } catch (e) { clearInterval(poll); }
+        }, 2000);
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:#f44336">Error: ${e}</span>`;
+    }
+}
+
 function panelFindPath() {
     const from = document.getElementById('selFrom').value;
     const to = document.getElementById('selTo').value;
@@ -1698,6 +1903,7 @@ function clearPath() {
     _lastPathData = null;
     pathLines.forEach(l => map.removeLayer(l));
     pathLines = [];
+    clearTraceLines();
     resetNodeStyles();
     document.getElementById('path-result').innerHTML = '';
     document.getElementById('selFrom').value = '';

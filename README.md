@@ -171,9 +171,9 @@ Provides discovery control, path finding, network reports, topology editing, and
 Discovery runs in rounds, each with four phases of increasing cost:
 
 1. **Trace sweep** -- trace all reachable nodes (no login needed, bidirectional SNR)
-2. **Login & neighbors** -- authenticate for full neighbor tables + node status
-3. **Proximity probe** -- test close node pairs (< configurable km) with no known link
-4. **Flood discovery** -- last resort firmware-based path discovery for unreachable nodes
+2. **Proximity probe** -- test close node pairs with no known link, improving routes early
+3. **Login & neighbors** -- authenticate for full neighbor tables + node status (benefits from better routes)
+4. **Flood discovery** -- firmware-based path discovery, reveals routes we missed
 
 Routes are computed using a **widest-path algorithm** (modified Dijkstra) that maximizes the weakest link SNR, with configurable hop penalty, health-aware routing, and soft handling of inferred edges.
 

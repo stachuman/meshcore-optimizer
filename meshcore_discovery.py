@@ -1166,19 +1166,15 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
     if not gaps:
         return 0
 
-    print(f"\n  Phase 3: Proximity probe "
-          f"({len(gaps)} gaps within {ctx.probe_distance_km} km)")
-
-    probe_count = 0
+    # Compute paths and sort by best reachable path (best first)
+    scored_gaps = []
     for node_a, node_b, dist_km in gaps:
-        # Need a route to at least one of them
         path_a = widest_path(ctx.graph, ctx.companion_prefix, node_a.prefix)
         path_b = widest_path(ctx.graph, ctx.companion_prefix, node_b.prefix)
 
         if not path_a.found and not path_b.found:
             continue
 
-        # Pick the one with better path as "via", the other as target
         if path_a.found and (not path_b.found or
                 path_a.bottleneck_snr >= path_b.bottleneck_snr):
             via_node, target_node = node_a, node_b
@@ -1186,6 +1182,23 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
         else:
             via_node, target_node = node_b, node_a
             via_path = path_b
+
+        scored_gaps.append((via_path.bottleneck_snr, dist_km,
+                            via_node, target_node, via_path,
+                            path_a, path_b))
+
+    scored_gaps.sort(key=lambda x: -x[0])  # best path SNR first
+
+    if not scored_gaps:
+        return 0
+
+    print(f"\n  Phase 2: Proximity probe "
+          f"({len(scored_gaps)} gaps within "
+          f"{ctx.probe_distance_km} km)")
+
+    probe_count = 0
+    for (best_snr, dist_km, via_node, target_node, via_path,
+         path_a, path_b) in scored_gaps:
 
         print(f"\n    Probing: {via_node.name} [{via_node.prefix[:4]}] "
               f"↔ {target_node.name} [{target_node.prefix[:4]}] "
@@ -1243,13 +1256,14 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
                 await asyncio.sleep(ctx.delay)
 
         # If primary direction failed, try reverse (B → A instead of A → B)
-        if not found and path_a.found and path_b.found:
-            # Swap: route through the other node
+        # Route through target_node to reach via_node
+        path_to_target = widest_path(
+            ctx.graph, ctx.companion_prefix, target_node.prefix)
+        if not found and path_to_target.found:
             rev_via = target_node
             rev_target = via_node
-            rev_path = path_b if via_node == node_a else path_a
 
-            rev_hops = [p[:ADDR_HEX].lower() for p in rev_path.path]
+            rev_hops = [p[:ADDR_HEX].lower() for p in path_to_target.path]
             rev_target_hop = rev_target.prefix[:ADDR_HEX].lower()
             rev_fwd = rev_hops + [rev_target_hop]
             rev_addrs = rev_fwd + list(reversed(rev_fwd[:-1]))
@@ -1275,21 +1289,163 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
                 elif err:
                     print(f"    {err}")
 
+        # If all trace attempts failed, try flood discovery as fallback
+        if not found:
+            print(f"    Traces failed — trying flood discovery")
+            edges = await _flood_probe_node(
+                ctx, target_node.prefix, label="fallback")
+            if edges > 0:
+                found = True
+
         probe_count += 1
         await asyncio.sleep(ctx.delay)
 
     return probe_count
 
 
-async def _run_flood_discovery(ctx: _DiscoveryCtx):
-    """Phase 4: Use firmware flood-based path discovery to learn routes
-    the firmware knows but we don't.  Targets nodes where our path is
-    long or has many inferred edges.  When the firmware reveals a
-    different/shorter route, we trace the unknown hops to measure SNR."""
+async def _flood_probe_node(ctx, target_prefix, label=""):
+    """Send disc_path flood for a target node, probe any missing edges found.
+    Returns number of new edges discovered."""
     from meshcore import EventType
     from meshcore_topology import widest_path
 
-    # Candidate: any reachable node with a long path or many inferred edges
+    node = ctx.graph.nodes.get(target_prefix)
+    contact = ctx.contact_map.get(target_prefix)
+    if not node or not contact:
+        return 0
+
+    if label:
+        print(f"    Flood {label}: {node.name} [{target_prefix[:4]}]")
+    else:
+        print(f"    Flood: {node.name} [{target_prefix[:4]}]")
+
+    path_queue = asyncio.Queue()
+    def _on_path(event):
+        path_queue.put_nowait(event)
+    sub = ctx.mc.subscribe(EventType.PATH_RESPONSE, _on_path)
+
+    new_edges = 0
+    try:
+        print(f"      TX: Path discovery...")
+        res = await asyncio.wait_for(
+            ctx.mc.commands.send_path_discovery(contact),
+            timeout=ctx.timeout)
+
+        if res is None or res.type == EventType.ERROR:
+            sub.unsubscribe()
+            print(f"      TX: Failed")
+            return 0
+
+        try:
+            ev = await asyncio.wait_for(
+                path_queue.get(), timeout=ctx.timeout)
+        except asyncio.TimeoutError:
+            print(f"      RX: No response (timeout)")
+            return 0
+        finally:
+            sub.unsubscribe()
+
+        out_path = ev.payload.get("out_path", "")
+        in_path = ev.payload.get("in_path", "")
+        out_hlen = ev.payload.get("out_path_hash_len", 1)
+        in_hlen = ev.payload.get("in_path_hash_len", 1)
+
+        out_hops = _decode_path_hops(out_path, out_hlen)
+        in_hops = _decode_path_hops(in_path, in_hlen)
+        out_resolved = [_resolve_hop(h, ctx.graph) for h in out_hops]
+        in_resolved = [_resolve_hop(h, ctx.graph) for h in in_hops]
+
+        def _hop_name(h, p):
+            if p and p in ctx.graph.nodes:
+                return f"{ctx.graph.nodes[p].name} [{h}]"
+            return f"[{h}]"
+
+        out_display = ("direct" if not out_hops else
+            " -> ".join(_hop_name(h, p)
+                        for h, p in zip(out_hops, out_resolved)))
+        in_display = ("direct" if not in_hops else
+            " -> ".join(_hop_name(h, p)
+                        for h, p in zip(in_hops, in_resolved)))
+
+        print(f"      RX: out: {out_display}, in: {in_display}")
+
+        # Find missing edges in firmware's paths
+        unknown_pairs = set()
+        for hop_list in [out_resolved, in_resolved]:
+            full = ([ctx.companion_prefix] +
+                    [h for h in hop_list if h] + [target_prefix])
+            for j in range(len(full) - 1):
+                a, b = full[j], full[j + 1]
+                if a and b and a != b:
+                    if (not ctx.graph.get_edge(a, b) and
+                            not ctx.graph.get_edge(b, a)):
+                        unknown_pairs.add(tuple(sorted([a, b])))
+
+        if unknown_pairs:
+            print(f"      Missing edges: {len(unknown_pairs)}")
+            for pa, pb in unknown_pairs:
+                na = ctx.graph.nodes.get(pa)
+                nb = ctx.graph.nodes.get(pb)
+                if not na or not nb:
+                    continue
+                print(f"      Probing: {na.name} [{pa[:4]}] "
+                      f"↔ {nb.name} [{pb[:4]}]")
+
+                path_to_a = widest_path(
+                    ctx.graph, ctx.companion_prefix, pa)
+                if not path_to_a.found:
+                    path_to_b = widest_path(
+                        ctx.graph, ctx.companion_prefix, pb)
+                    if not path_to_b.found:
+                        print(f"        Neither reachable")
+                        continue
+                    path_to_a = path_to_b
+                    pa, pb = pb, pa
+
+                ADDR_HEX = HOP_HEX_LEN
+                via_hops = [p[:ADDR_HEX].lower()
+                            for p in path_to_a.path]
+                target_hop = pb[:ADDR_HEX].lower()
+                fwd = via_hops + [target_hop]
+                trace_addrs = fwd + list(reversed(fwd[:-1]))
+                forced = ",".join(trace_addrs)
+
+                probe_contact = (ctx.contact_map.get(pb) or
+                                 ctx.contact_map.get(pa))
+                if not probe_contact:
+                    continue
+
+                ok, t_edges, err = await _trace_repeater(
+                    ctx.mc, probe_contact,
+                    ctx.companion_prefix, pb,
+                    ctx.graph, ctx.timeout,
+                    forced_trace_path=forced)
+
+                if ok and t_edges > 0:
+                    print(f"        +{t_edges} edges!")
+                    new_edges += t_edges
+                    ctx.graph.infer_reverse_edges(ctx.infer_penalty)
+                    ctx.fix_names()
+                    ctx.save()
+                elif err:
+                    print(f"        {err}")
+
+                await asyncio.sleep(ctx.delay)
+
+    except asyncio.TimeoutError:
+        print(f"      Timeout")
+    except Exception as e:
+        print(f"      Error: {e}")
+
+    return new_edges
+
+
+async def _run_flood_discovery(ctx: _DiscoveryCtx):
+    """Phase 4: Use firmware flood-based path discovery to learn routes
+    the firmware knows but we don't.  Targets nodes where our path is
+    long or has many inferred edges."""
+    from meshcore_topology import widest_path
+
     candidates = []
     for prefix in list(ctx.graph.nodes.keys()):
         if prefix == ctx.companion_prefix:
@@ -1303,7 +1459,6 @@ async def _run_flood_discovery(ctx: _DiscoveryCtx):
         if not pr.found:
             continue
 
-        # Score: prefer nodes with long paths or inferred edges
         inferred_count = sum(1 for e in pr.edges
                              if e.source == "inferred")
         if pr.hop_count >= 3 or inferred_count >= 1:
@@ -1313,17 +1468,17 @@ async def _run_flood_discovery(ctx: _DiscoveryCtx):
     if not candidates:
         return 0
 
-    candidates.sort(key=lambda x: -x[0])  # worst first
+    candidates.sort(key=lambda x: -x[0])
     print(f"\n  Phase 4: Flood discovery "
           f"({len(candidates)} candidates)")
 
     flood_count = 0
-    new_edges = 0
+    total_edges = 0
 
     for score, prefix, node, contact, our_path in candidates:
         print(f"\n    {node.name} [{prefix[:4]}] — "
-              f"our path: {our_path.hop_count} hops, "
-              f"bottleneck {our_path.bottleneck_snr:+.1f} dB")
+              f"our: {our_path.hop_count}h "
+              f"{our_path.bottleneck_snr:+.1f} dB")
 
         if ctx.radio_config:
             try:
@@ -1331,144 +1486,13 @@ async def _run_flood_discovery(ctx: _DiscoveryCtx):
             except Exception:
                 break
 
-        # Send path discovery
-        path_queue = asyncio.Queue()
-        def _on_path(event):
-            path_queue.put_nowait(event)
-        sub = ctx.mc.subscribe(EventType.PATH_RESPONSE, _on_path)
-
-        try:
-            print(f"      TX: Path discovery...")
-            res = await asyncio.wait_for(
-                ctx.mc.commands.send_path_discovery(contact),
-                timeout=ctx.timeout)
-
-            if res is None or res.type == EventType.ERROR:
-                sub.unsubscribe()
-                print(f"      TX: Failed")
-                continue
-
-            try:
-                ev = await asyncio.wait_for(
-                    path_queue.get(), timeout=ctx.timeout)
-            except asyncio.TimeoutError:
-                print(f"      RX: No response (timeout)")
-                continue
-            finally:
-                sub.unsubscribe()
-
-            out_path = ev.payload.get("out_path", "")
-            in_path = ev.payload.get("in_path", "")
-            out_hlen = ev.payload.get("out_path_hash_len", 1)
-            in_hlen = ev.payload.get("in_path_hash_len", 1)
-            out_len = ev.payload.get("out_path_len", 0)
-            in_len = ev.payload.get("in_path_len", 0)
-
-            # Decode hop hashes
-            out_hops = _decode_path_hops(out_path, out_hlen)
-            in_hops = _decode_path_hops(in_path, in_hlen)
-
-            # Resolve hashes to node prefixes
-            out_resolved = [_resolve_hop(h, ctx.graph) for h in out_hops]
-            in_resolved = [_resolve_hop(h, ctx.graph) for h in in_hops]
-
-            out_names = [ctx.graph.nodes[p].name if p in ctx.graph.nodes
-                         else f"[{h}]"
-                         for h, p in zip(out_hops, out_resolved)]
-            in_names = [ctx.graph.nodes[p].name if p in ctx.graph.nodes
-                        else f"[{h}]"
-                        for h, p in zip(in_hops, in_resolved)]
-
-            is_direct = (out_len == 0 or out_path == "")
-            out_display = "direct" if is_direct else " -> ".join(out_names)
-            in_direct = (in_len == 0 or in_path == "")
-            in_display = "direct" if in_direct else " -> ".join(in_names)
-
-            print(f"      RX: out: {out_display}, in: {in_display}")
-
-            # Find unknown hops — nodes in firmware path not in our graph
-            # or pairs with no edge between them
-            all_fw_hops = set(out_resolved + in_resolved) - {None, ""}
-            unknown_pairs = set()
-
-            # Check consecutive hops in firmware paths for missing edges
-            for hop_list in [out_resolved, in_resolved]:
-                # Build full path: companion → hops → target
-                full = [ctx.companion_prefix] + \
-                       [h for h in hop_list if h] + [prefix]
-                for j in range(len(full) - 1):
-                    a, b = full[j], full[j + 1]
-                    if a and b and a != b:
-                        if (not ctx.graph.get_edge(a, b) and
-                                not ctx.graph.get_edge(b, a)):
-                            unknown_pairs.add(tuple(sorted([a, b])))
-
-            if unknown_pairs:
-                print(f"      Missing edges in firmware path: "
-                      f"{len(unknown_pairs)}")
-                # Probe each missing pair with a trace
-                for pa, pb in unknown_pairs:
-                    na = ctx.graph.nodes.get(pa)
-                    nb = ctx.graph.nodes.get(pb)
-                    if not na or not nb:
-                        continue
-                    print(f"      Probing: {na.name} [{pa[:4]}] "
-                          f"↔ {nb.name} [{pb[:4]}]")
-
-                    # Build trace through the pair
-                    path_to_a = widest_path(
-                        ctx.graph, ctx.companion_prefix, pa)
-                    if not path_to_a.found:
-                        path_to_b = widest_path(
-                            ctx.graph, ctx.companion_prefix, pb)
-                        if not path_to_b.found:
-                            print(f"        Neither reachable")
-                            continue
-                        path_to_a = path_to_b
-                        pa, pb = pb, pa
-
-                    ADDR_HEX = 4
-                    via_hops = [p[:ADDR_HEX].lower()
-                                for p in path_to_a.path]
-                    target_hop = pb[:ADDR_HEX].lower()
-                    fwd = via_hops + [target_hop]
-                    trace_addrs = fwd + list(reversed(fwd[:-1]))
-                    forced = ",".join(trace_addrs)
-
-                    probe_contact = (ctx.contact_map.get(pb) or
-                                     ctx.contact_map.get(pa))
-                    if not probe_contact:
-                        continue
-
-                    ok, t_edges, err = await _trace_repeater(
-                        ctx.mc, probe_contact,
-                        ctx.companion_prefix, pb,
-                        ctx.graph, ctx.timeout,
-                        forced_trace_path=forced)
-
-                    if ok and t_edges > 0:
-                        print(f"        +{t_edges} edges!")
-                        new_edges += t_edges
-                        ctx.graph.infer_reverse_edges(
-                            ctx.infer_penalty)
-                        ctx.fix_names()
-                        ctx.save()
-                    elif err:
-                        print(f"        {err}")
-
-                    await asyncio.sleep(ctx.delay)
-
-            flood_count += 1
-
-        except asyncio.TimeoutError:
-            print(f"      Timeout")
-        except Exception as e:
-            print(f"      Error: {e}")
-
+        edges = await _flood_probe_node(ctx, prefix)
+        total_edges += edges
+        flood_count += 1
         await asyncio.sleep(ctx.delay)
 
-    if new_edges:
-        print(f"\n  Phase 4 total: +{new_edges} edges from "
+    if total_edges:
+        print(f"\n  Phase 4: +{total_edges} edges from "
               f"{flood_count} discoveries")
 
     return flood_count
@@ -1519,9 +1543,9 @@ async def progressive_discovery(mc, graph: NetworkGraph,
     Round 0: Login to companion repeater, fetch its neighbor table (seeds graph).
     Rounds 1+:
       Phase 1 — Trace sweep: trace all reachable nodes (best-first).
-      Phase 2 — Login bonus: login for full neighbor tables (richer data).
-      Phase 3 — Proximity probe: test close node pairs with no known edge.
-      Phase 4 — Flood discovery: last resort for nodes with no real data.
+      Phase 2 — Proximity probe: test close node pairs, fill gaps early.
+      Phase 3 — Login & neighbors: richer data, benefits from better routes.
+      Phase 4 — Flood discovery: firmware-based, reveals missed routes.
 
     Saves topology after every graph update. State is persisted for resume.
     """
@@ -1647,8 +1671,8 @@ async def progressive_discovery(mc, graph: NetworkGraph,
 
             await ctx.refresh_contacts()
             trace_count = await _run_trace_phase(ctx)
-            login_count = await _run_login_phase(ctx)
             probe_count = await _run_proximity_probe(ctx)
+            login_count = await _run_login_phase(ctx)
             flood_count = await _run_flood_discovery(ctx)
 
             round_edges = graph.stats()['edges'] - round_edges_before

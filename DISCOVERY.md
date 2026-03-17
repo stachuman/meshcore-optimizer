@@ -10,8 +10,8 @@ Discovery is a multi-round, multi-phase process. Each round progressively builds
 Round 0: Seed — login to companion repeater, fetch its neighbor table
 Round 1+:
   Phase 1 — Trace sweep      (cheap, no login needed)
-  Phase 2 — Login & neighbors (richer data, needs password)
-  Phase 3 — Proximity probe   (targeted, tests GPS-based hypotheses)
+  Phase 2 — Proximity probe   (fill GPS-based gaps before login)
+  Phase 3 — Login & neighbors (richer data, benefits from better routes)
   Phase 4 — Flood discovery   (expensive, last resort)
 ```
 
@@ -80,9 +80,15 @@ When a trace fails through an intermediate, that intermediate's fail counter inc
 
 After all alternatives are exhausted for a target, it's marked as traced (won't be retried this round).
 
-## Phase 2: Login & Neighbors
+## Phase 2: Proximity Probe
 
-Logs into reachable repeaters to fetch their full neighbor tables. This provides the richest data — every node the repeater can hear, with SNR and timestamps.
+Runs **before** login to fill gaps in the graph while routing is cheap. Discovering missing links early means the login phase has better routes to reach nodes.
+
+See the full description below in [Proximity Probe Details](#proximity-probe-details).
+
+## Phase 3: Login & Neighbors
+
+Logs into reachable repeaters to fetch their full neighbor tables. This provides the richest data — every node the repeater can hear, with SNR and timestamps. Benefits from links discovered by the proximity probe.
 
 ### Candidate Selection
 
@@ -109,9 +115,9 @@ On successful login:
 3. Wildcard entries (`*`)
 4. Default guest passwords (e.g., blank, "hello")
 
-## Phase 3: Proximity Probe
+## Proximity Probe Details
 
-After phases 1 and 2, some nearby nodes may have no known link between them — a "proximity gap." This phase tests those gaps using targeted traces.
+After the trace sweep, some nearby nodes may have no known link between them — a "proximity gap." Phase 2 tests those gaps using targeted traces.
 
 ### Gap Detection
 
