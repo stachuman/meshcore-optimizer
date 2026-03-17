@@ -959,6 +959,14 @@ async def _run_trace_phase(ctx: _DiscoveryCtx):
             if not pr.found:
                 unreachable += 1
                 continue
+
+            # Skip if all edges along the path are already measured
+            all_measured = all(
+                e.source in ("neighbors", "trace") for e in pr.edges)
+            if all_measured and pr.edges:
+                ctx.ds.traced_set.add(prefix)
+                continue
+
             score = _effective_snr(pr)
             if score > best_score:
                 best_prefix = prefix
