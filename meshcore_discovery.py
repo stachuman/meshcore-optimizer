@@ -1200,6 +1200,11 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
             via_node, target_node = node_b, node_a
             via_path = path_b
 
+        # Skip if the via path is too long — trace would time out
+        if via_path.hop_count > 4:
+            skipped += 1
+            continue
+
         scored_gaps.append((via_path.bottleneck_snr, dist_km,
                             via_node, target_node, via_path,
                             path_a, path_b))

@@ -182,7 +182,7 @@ class DiscoveryRunner:
                 self.status = "error"
                 self.error = str(e)
             finally:
-                self._loop.close()
+                _close_loop(self._loop)
                 self._loop = None
                 self._task = None
                 self.stopped_at = datetime.now().isoformat(timespec="seconds")
@@ -215,6 +215,18 @@ class _LogCapture(io.TextIOBase):
     def flush(self):
         if self._real:
             self._real.flush()
+
+
+def _close_loop(loop):
+    """Close an asyncio loop, draining pending tasks first."""
+    try:
+        pending = asyncio.all_tasks(loop)
+        if pending:
+            loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True))
+    except Exception:
+        pass
+    loop.close()
 
 
 # Module-level singleton
@@ -288,12 +300,7 @@ class NodeCommander:
                         self._async_trace(config, graph,
                                           target_prefix, topology_file))
                 finally:
-                    pending = asyncio.all_tasks(loop)
-                    if pending:
-                        loop.run_until_complete(
-                            asyncio.gather(*pending,
-                                           return_exceptions=True))
-                    loop.close()
+                    _close_loop(loop)
                 return
 
             target = target_prefix.upper()
@@ -319,12 +326,7 @@ class NodeCommander:
                     self._async_run(config, graph, node, path_result,
                                     action, topology_file))
             finally:
-                # Let pending tasks finish to avoid "Task destroyed" warnings
-                pending = asyncio.all_tasks(loop)
-                if pending:
-                    loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True))
-                loop.close()
+                _close_loop(loop)
 
         except Exception as e:
             self.result = {"ok": False, "error": str(e)}
@@ -698,7 +700,7 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
                 loop.run_until_complete(
                     asyncio.wait_for(_test(), timeout=15))
             finally:
-                loop.close()
+                _close_loop(loop)
 
         try:
             t = threading.Thread(target=_run, daemon=True)
