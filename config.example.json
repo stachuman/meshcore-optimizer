@@ -12,6 +12,7 @@
     "infer_penalty": 5.0,
     "hop_penalty": 1.0,
     "probe_distance_km": 2.0,
+    "probe_min_snr": -5.0,
     "save_file": "topology.json"
   },
   "passwords": [],

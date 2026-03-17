@@ -165,6 +165,7 @@ class DiscoveryRunner:
                         default_guest_passwords=config.default_guest_passwords,
                         radio_config=config.radio,
                         probe_distance_km=config.discovery_probe_distance_km,
+                        probe_min_snr=config.discovery_probe_min_snr,
                     )
                 finally:
                     await mc.disconnect()
@@ -1093,10 +1094,15 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
             <div>
                 <label class="field">Probe Distance (km)</label>
                 <input id="cfgProbeDist" type="number" value="2.0" step="0.5">
-                <div class="hint">Max distance to probe missing links between nodes.</div>
+                <div class="hint">Max distance to probe missing links.</div>
             </div>
         </div>
         <div class="row">
+            <div>
+                <label class="field">Probe Min SNR (dB)</label>
+                <input id="cfgProbeMinSnr" type="number" value="-5.0" step="1">
+                <div class="hint">Only probe gaps where path is below this. Higher = probe more.</div>
+            </div>
             <div>
                 <label class="field">Save File</label>
                 <input id="cfgSaveFile" value="topology.json">
@@ -2054,6 +2060,7 @@ function populateSettingsForm(cfg) {
     document.getElementById('cfgInferPenalty').value = disc.infer_penalty || 5;
     document.getElementById('cfgHopPenalty').value = disc.hop_penalty ?? 1.0;
     document.getElementById('cfgProbeDist').value = disc.probe_distance_km ?? 2.0;
+    document.getElementById('cfgProbeMinSnr').value = disc.probe_min_snr ?? -5.0;
     document.getElementById('cfgSaveFile').value = disc.save_file || 'topology.json';
 
     // Health penalties
@@ -2127,6 +2134,7 @@ function buildConfigFromForm() {
             infer_penalty: f('cfgInferPenalty') || 5,
             hop_penalty: f('cfgHopPenalty') ?? 1.0,
             probe_distance_km: f('cfgProbeDist') ?? 2.0,
+            probe_min_snr: f('cfgProbeMinSnr') ?? -5.0,
             save_file: v('cfgSaveFile') || 'topology.json',
         },
         passwords: passwords,

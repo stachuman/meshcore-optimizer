@@ -148,6 +148,7 @@ class Config:
     discovery_save_file: str = "topology.json"
     discovery_hop_penalty: float = 1.0
     discovery_probe_distance_km: float = 2.0
+    discovery_probe_min_snr: float = -5.0
     passwords: list = None
     default_guest_passwords: list = None
     health_penalties: dict = None
@@ -203,6 +204,7 @@ def load_config(filename: str) -> Config:
         discovery_save_file=disc.get("save_file", "topology.json"),
         discovery_hop_penalty=disc.get("hop_penalty", 1.0),
         discovery_probe_distance_km=disc.get("probe_distance_km", 2.0),
+        discovery_probe_min_snr=disc.get("probe_min_snr", -5.0),
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
                                          DEFAULT_GUEST_PASSWORDS),
@@ -780,7 +782,8 @@ class _DiscoveryCtx:
     def __init__(self, mc, graph, companion_prefix, contact_map, name_map,
                  ds, passwords, default_guest_passwords, timeout, delay,
                  infer_penalty, radio_config, save_file, state_file,
-                 alt_snr_gap=10.0, probe_distance_km=2.0):
+                 alt_snr_gap=10.0, probe_distance_km=2.0,
+                 probe_min_snr=-5.0):
         self.mc = mc
         self.graph = graph
         self.companion_prefix = companion_prefix
@@ -797,6 +800,7 @@ class _DiscoveryCtx:
         self.state_file = state_file
         self.alt_snr_gap = alt_snr_gap
         self.probe_distance_km = probe_distance_km
+        self.probe_min_snr = probe_min_snr
 
     def fix_names(self):
         """Update node names and locations from contact data."""
@@ -1170,12 +1174,22 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
         return 0
 
     # Compute paths and sort by best reachable path (best first)
+    # Only probe gaps where at least one node has a poor path
+    # (below probe_min_snr) — a new edge could improve routing
     scored_gaps = []
+    skipped = 0
     for node_a, node_b, dist_km in gaps:
         path_a = widest_path(ctx.graph, ctx.companion_prefix, node_a.prefix)
         path_b = widest_path(ctx.graph, ctx.companion_prefix, node_b.prefix)
 
         if not path_a.found and not path_b.found:
+            continue
+
+        # Skip if both nodes already have good paths
+        snr_a = path_a.bottleneck_snr if path_a.found else -999
+        snr_b = path_b.bottleneck_snr if path_b.found else -999
+        if snr_a > ctx.probe_min_snr and snr_b > ctx.probe_min_snr:
+            skipped += 1
             continue
 
         if path_a.found and (not path_b.found or
@@ -1193,11 +1207,15 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
     scored_gaps.sort(key=lambda x: -x[0])  # best path SNR first
 
     if not scored_gaps:
+        if skipped:
+            print(f"\n  Phase 2: Proximity probe — "
+                  f"{skipped} gaps skipped (paths above "
+                  f"{ctx.probe_min_snr:+.1f} dB)")
         return 0
 
     print(f"\n  Phase 2: Proximity probe "
-          f"({len(scored_gaps)} gaps within "
-          f"{ctx.probe_distance_km} km)")
+          f"({len(scored_gaps)} gaps, {skipped} skipped, "
+          f"threshold {ctx.probe_min_snr:+.1f} dB)")
 
     probe_count = 0
     for (best_snr, dist_km, via_node, target_node, via_path,
@@ -1467,6 +1485,10 @@ async def _run_flood_discovery(ctx: _DiscoveryCtx):
         if not pr.found:
             continue
 
+        # Only flood nodes with poor paths (below threshold)
+        if pr.bottleneck_snr > ctx.probe_min_snr:
+            continue
+
         inferred_count = sum(1 for e in pr.edges
                              if e.source == "inferred")
         if pr.hop_count >= 3 or inferred_count >= 1:
@@ -1544,7 +1566,8 @@ async def progressive_discovery(mc, graph: NetworkGraph,
                                 save_file: str = None,
                                 default_guest_passwords: list = None,
                                 radio_config: RadioConfig = None,
-                                probe_distance_km: float = 2.0):
+                                probe_distance_km: float = 2.0,
+                                probe_min_snr: float = -5.0):
     """
     Run progressive topology discovery.
 
@@ -1657,6 +1680,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
         radio_config=radio_config, save_file=save_file,
         state_file=state_file,
         probe_distance_km=probe_distance_km,
+        probe_min_snr=probe_min_snr,
     )
 
     stopped = False
@@ -2162,6 +2186,7 @@ Examples:
                 default_guest_passwords=default_guest_pws,
                 radio_config=config.radio,
                 probe_distance_km=config.discovery_probe_distance_km,
+                probe_min_snr=config.discovery_probe_min_snr,
             )
         finally:
             await mc.disconnect()

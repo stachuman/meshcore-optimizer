@@ -74,9 +74,11 @@ Trace path: companion → A → B → target → B → A → companion
 
 The response contains per-hop SNR values. The first and last entries (client-to-repeater) are skipped — only mesh radio hops are extracted as edges.
 
-### Failure Handling
+### Success and Failure Handling
 
-When a trace fails through an intermediate, that intermediate's fail counter increments. At 3 consecutive failures, the intermediate is **deprioritized** (penalized in scoring, not excluded). This allows the algorithm to try other routes first while still eventually retrying.
+When a trace **succeeds** (gets a response with SNR data), it breaks immediately — no alternatives are tried, even if no new edges were added (the links were already known). This avoids wasting airtime on redundant probes.
+
+When a trace **fails** through an intermediate, that intermediate's fail counter increments. At 3 consecutive failures, the intermediate is **deprioritized** (penalized in scoring, not excluded). This allows the algorithm to try other routes first while still eventually retrying.
 
 After all alternatives are exhausted for a target, it's marked as traced (won't be retried this round).
 
@@ -125,50 +127,68 @@ Using GPS coordinates of all nodes:
 1. Compute haversine distance between every pair
 2. Filter: distance < `probe_distance_km` (default 2.0 km, configurable)
 3. Filter: no edge exists in either direction
-4. Sort by distance (closest first)
+4. Filter: at least one node's path bottleneck is **below** `probe_min_snr` (default -5.0 dB) — gaps between nodes that already have good paths are skipped
+5. Sort by best reachable path SNR (best first, for highest success probability)
 
 ### Probe Execution
 
 For each gap (node A ↔ node B):
 1. Check if at least one is reachable from companion
 2. Pick the one with the better path as "via", the other as "target"
-3. Construct a trace that goes through both:
+3. Try up to **2 trace attempts** in the primary direction (via → target)
+4. If both fail, try the **reverse direction** (target → via)
+5. If all traces fail, try **flood discovery** (`disc_path`) to the target as a last resort
+6. The trace path forces routing through both nodes:
    ```
    companion → ... → via_node → target_node → ... → companion
    ```
-4. The trace response reveals the via→target SNR directly
+7. The trace response reveals the via→target SNR directly
 
 ### Why This Matters
 
-Some links exist physically but aren't discovered by phases 1-2:
+Some links exist physically but aren't discovered by traces or login:
 - Node A's neighbor table doesn't list B (different timing, or login failed)
 - Direct trace to B uses a different route that doesn't pass through A
 - The firmware knows the link but our graph doesn't
 
 Example: two repeaters 330m apart in the same neighborhood, both heard by the companion, but neither's neighbor table lists the other. A proximity probe discovers the direct link.
 
+### Probe Min SNR Threshold
+
+The `probe_min_snr` setting (default -5.0 dB) controls which gaps are worth probing:
+- Only gaps where at least one node has a path **worse** than this threshold are probed
+- Gaps between nodes that both have good paths are skipped — discovering an edge between them wouldn't improve routing significantly
+- Set higher (e.g., 0 dB) to probe more aggressively, lower (e.g., -15 dB) to be more conservative
+
 ## Phase 4: Flood Discovery
 
-Last resort for nodes where:
-- Trace failed or timed out
-- Login failed (no valid password, unreachable)
-- Proximity probe didn't help
-- But we believe the node should be reachable
+Uses firmware's `send_path_discovery` to learn routes the firmware knows but we don't. Targets nodes where our path is long or has many inferred edges.
 
-Uses MeshCore's `send_path_discovery` command, which sends a flood packet and waits for the network to respond with discovered routes.
+Note: flood discovery is also used as a **fallback within Phase 2** (proximity probe) when trace attempts fail for a specific gap.
+
+### How It Works
+
+1. Sends a flood packet asking the network "who can reach this node?"
+2. The firmware broadcasts and waits for a response from the target
+3. The response contains `out_path` (forward route) and `in_path` (return route) as hop sequences
+4. These reveal intermediate nodes and links we might be missing
+5. Any **missing edges** found in the firmware's path are then **trace-probed** to measure actual SNR
 
 ### Candidate Selection
 
-Only nodes that:
-- Have zero **measured** edges (no "neighbors" or "trace" source edges)
-- Have already been attempted by trace (in `traced_set`)
+Nodes that:
+- Have a path with bottleneck SNR **below** `probe_min_snr` (configurable, default -5.0 dB)
+- Have 3+ hops or at least 1 inferred edge on their path
 - Have a contact in the radio's contact list
+
+Candidates are sorted by worst-first (highest hop count + inferred edge count).
 
 ### Limitations
 
 - Expensive: flood packets consume airtime across the entire mesh
-- Response provides route information (out_path, in_path) but no SNR values
-- Used sparingly and only as a final fallback
+- Many nodes don't respond (especially distant ones)
+- Response provides route hops but no SNR values — requires follow-up trace probes
+- Used as a last resort after cheaper methods have been exhausted
 
 ## Routing Algorithm: Widest Path
 
@@ -279,6 +299,7 @@ All discovery parameters in `config.json`:
     "infer_penalty": 5.0,
     "hop_penalty": 1.0,
     "probe_distance_km": 2.0,
+    "probe_min_snr": -5.0,
     "save_file": "topology.json"
   }
 }
@@ -292,4 +313,5 @@ All discovery parameters in `config.json`:
 | `infer_penalty` | 5.0 | SNR penalty for inferred reverse edges (dB) |
 | `hop_penalty` | 1.0 | Per-hop cost in path scoring (dB) |
 | `probe_distance_km` | 2.0 | Max distance for proximity gap probing (km) |
+| `probe_min_snr` | -5.0 | Only probe gaps/flood nodes with path below this SNR (dB) |
 | `save_file` | topology.json | Output topology file |

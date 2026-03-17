@@ -924,6 +924,7 @@ def run_live_discovery(state: AppState):
                 default_guest_passwords=state.default_guest_pws,
                 radio_config=state.config.radio,
                 probe_distance_km=state.config.discovery_probe_distance_km,
+                probe_min_snr=state.config.discovery_probe_min_snr,
             )
             state.modified = False  # saved by progressive_discovery
         except KeyboardInterrupt:
