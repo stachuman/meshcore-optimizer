@@ -105,7 +105,7 @@ cp passwords_example.json passwords.json
 Start the interactive map server:
 
 ```bash
-python meshcore_web.py
+python web.py
 ```
 
 Open the displayed URL (e.g., `http://192.168.1.20:8080`) in a browser on any device on your network. From there you can:
@@ -127,7 +127,7 @@ Options:
 Run discovery directly:
 
 ```bash
-python meshcore_discovery.py --config config.json
+python -m meshcore_optimizer.discovery --config config.json
 ```
 
 Options:
@@ -147,13 +147,13 @@ Compute optimal routes from an existing topology file:
 
 ```bash
 # Best path between two nodes
-python meshcore_topology.py --topology topology.json --from-node MORENA --to-node SWIBNO
+python -m meshcore_optimizer.topology --topology topology.json --from-node MORENA --to-node SWIBNO
 
 # All-pairs bottleneck matrix
-python meshcore_topology.py --topology topology.json --all-pairs
+python -m meshcore_optimizer.topology --topology topology.json --all-pairs
 
 # With reverse edge inference
-python meshcore_topology.py --topology topology.json --all-pairs --infer 5.0
+python -m meshcore_optimizer.topology --topology topology.json --all-pairs --infer 5.0
 ```
 
 ### Text UI Manager
@@ -161,7 +161,7 @@ python meshcore_topology.py --topology topology.json --all-pairs --infer 5.0
 Full-featured menu interface:
 
 ```bash
-python meshcore_manager.py
+python tui.py
 ```
 
 Provides discovery control, path finding, network reports, topology editing, and configuration management in a single interface.
@@ -184,12 +184,29 @@ For the complete technical description, see **[Discovery Process & Routing Algor
 ## Project Structure
 
 ```
-meshcore_topology.py    Graph data structures, widest-path algorithm, serialization
-meshcore_discovery.py   Progressive radio-based topology discovery
-meshcore_web.py         Interactive web map with live discovery control
-meshcore_manager.py     Text UI for network management
-config.example.json     Example radio/discovery configuration
-passwords_example.json  Example repeater credentials
+web.py                            Start the web map server
+tui.py                            Start the text UI manager
+
+meshcore_optimizer/               Core package
+    constants.py                  Shared constants and defaults
+    config.py                     Configuration, credentials, discovery state
+    radio.py                      Radio communication helpers (connect, login, trace, status)
+    topology.py                   Graph data structures, widest-path algorithm, serialization
+    discovery.py                  Progressive multi-phase discovery engine
+    interactive.py                Manual data entry REPL (no radio needed)
+    web.py                        HTTP server, REST API, discovery/command control
+    web_template.py               Embedded HTML/JS/CSS for the network map UI
+    manager.py                    Text UI for network management
+
+config.example.json               Example radio/discovery configuration
+passwords_example.json            Example repeater credentials
+```
+
+You can also run modules directly with `python -m meshcore_optimizer.<module>`, or import:
+
+```python
+from meshcore_optimizer.topology import NetworkGraph, widest_path
+from meshcore_optimizer.config import load_config
 ```
 
 ## License

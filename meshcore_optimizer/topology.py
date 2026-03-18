@@ -17,7 +17,7 @@ Usage:
     from meshcore_topology import NetworkGraph, widest_path
 
     # As standalone CLI
-    python meshcore_topology.py --topology network.json --from NODE_A --to NODE_B
+    python -m meshcore_optimizer.topology --topology network.json --from NODE_A --to NODE_B
 
 Author: Stan (Gdańsk MeshCore Network)
 License: MIT
@@ -31,6 +31,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+
+from meshcore_optimizer.constants import (
+    SOURCE_PRIORITY, INFERRED_CONFIDENCE, ASYMMETRY_PENALTY_DB,
+    DEFAULT_INFER_PENALTY_DB, DEFAULT_HEALTH_PENALTIES,
+)
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -75,16 +80,6 @@ def set_health_weights(weights: dict):
     _health_weights = weights if weights else None
 
 
-DEFAULT_HEALTH_PENALTIES = {
-    "battery_critical": 3.0,     # bat < 3300 mV
-    "battery_warning": 1.0,      # bat < 3500 mV
-    "txqueue_high": 4.0,         # tx_queue_len > 5
-    "txqueue_low": 1.0,          # tx_queue_len > 0
-    "full_evts_high": 4.0,       # full_evts > 10
-    "full_evts_per": 0.5,        # per event, 1-10 (capped at 3.0)
-    "flood_dup_high": 3.0,       # dup rate > 70%
-    "flood_dup_medium": 1.0,     # dup rate > 50%
-}
 
 
 def compute_node_health_penalty(status: dict,
@@ -216,11 +211,7 @@ class NetworkGraph:
             self.add_node(RepeaterNode(
                 prefix=edge.to_prefix, name=f"[{edge.to_prefix}]"))
 
-        # Source priority: neighbors > trace > advert > manual > inferred
-        source_priority = {
-            "neighbors": 5, "trace": 4, "advert": 3,
-            "manual": 2, "inferred": 1
-        }
+        source_priority = SOURCE_PRIORITY
 
         if pair in self._edge_set:
             # Update existing edge if better source
@@ -457,7 +448,7 @@ class NetworkGraph:
                 timestamp=timestamp,
             ))
 
-    def infer_reverse_edges(self, penalty_db: float = 5.0):
+    def infer_reverse_edges(self, penalty_db: float = DEFAULT_INFER_PENALTY_DB):
         """
         For edges where we only know one direction, infer the reverse
         with a configurable SNR penalty.
@@ -478,7 +469,7 @@ class NetworkGraph:
                         snr_db=edge.snr_db - penalty_db,
                         source="inferred",
                         timestamp=timestamp,
-                        confidence=0.5,
+                        confidence=INFERRED_CONFIDENCE,
                     ))
 
         for edge in to_add:
@@ -768,10 +759,10 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
                 effective_snr = edge.snr_db
             elif edge.source == "inferred" and reverse_edge.source != "inferred":
                 # Forward is inferred, reverse is measured — trust measured
-                effective_snr = reverse_edge.snr_db - 2.0
+                effective_snr = reverse_edge.snr_db - ASYMMETRY_PENALTY_DB
             elif reverse_edge.source == "inferred" and edge.source != "inferred":
                 # Reverse is inferred, forward is measured — trust measured
-                effective_snr = edge.snr_db - 2.0
+                effective_snr = edge.snr_db - ASYMMETRY_PENALTY_DB
             else:
                 # Both measured or both inferred — use weaker
                 effective_snr = min(edge.snr_db, reverse_edge.snr_db)
@@ -1023,8 +1014,8 @@ def main():
     if not args.topology:
         parser.print_help()
         print("\n  Quick start:")
-        print("    python meshcore_topology.py --topology net.json --all-pairs")
-        print("    python meshcore_topology.py --topology net.json "
+        print("    python -m meshcore_optimizer.topology --topology net.json --all-pairs")
+        print("    python -m meshcore_optimizer.topology --topology net.json "
               "--from-node MORENA --to-node SWIBNO")
         return
 

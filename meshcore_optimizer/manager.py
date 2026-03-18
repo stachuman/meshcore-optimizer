@@ -25,12 +25,12 @@ import sys
 import json
 from datetime import datetime
 
-from meshcore_topology import (
+from meshcore_optimizer.topology import (
     NetworkGraph, RepeaterNode, DirectedEdge, PathResult,
     widest_path, widest_path_alternatives, all_pairs_widest,
     print_topology_report, print_path_result, print_all_pairs_report,
 )
-from meshcore_discovery import (
+from meshcore_optimizer.discovery import (
     RepeaterAccess, DEFAULT_GUEST_PASSWORDS,
     match_passwords, load_passwords, plan_discovery,
     Config, RadioConfig, load_config, save_config, connect_radio,
@@ -189,7 +189,7 @@ _map_server_url = None
 
 def launch_web_map(state: AppState):
     global _map_server_url
-    from meshcore_web import start_map_server
+    from meshcore_optimizer.web import start_map_server
 
     if _map_server_url:
         print(f"  Map already running: {c(_map_server_url, CYAN)}")
@@ -1271,7 +1271,8 @@ def _pick_companion(state: AppState):
             print(f"  {c('Invalid selection', RED)}")
             return
 
-        print(f"  {c(f'No repeater matches \"{entry}\"', RED)}")
+        msg = f'No repeater matches "{entry}"'
+        print(f"  {c(msg, RED)}")
         return
 
     # No radio or no repeaters — check graph nodes
@@ -1473,7 +1474,7 @@ def main():
                 state.companion_prefix = sys.argv[i + 2].upper()
             elif arg in ("--help", "-h"):
                 print("MeshCore Network Manager")
-                print("Usage: python meshcore_manager.py [options]")
+                print("Usage: python -m meshcore_optimizer.manager [options]")
                 print("  --config FILE     Load config (default: config.json)")
                 print("  --load FILE       Load topology")
                 print("  --passwords FILE  Load passwords")
