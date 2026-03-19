@@ -334,6 +334,28 @@ class NodeCommander:
                 self.result = {"ok": False, "error": f"Node {target} not in topology"}
                 return
 
+            if len(node.prefix) < 8:
+                # Stub node from 1-byte trace — can't contact directly
+                neighbors = []
+                for pfx, edges in graph.edges.items():
+                    for e in edges:
+                        if e.to_prefix == node.prefix and pfx != node.prefix:
+                            n = graph.nodes.get(pfx)
+                            neighbors.append(n.name if n else pfx)
+                for pfx, edges in graph.reverse_edges.items():
+                    for e in edges:
+                        if e.from_prefix == node.prefix and pfx != node.prefix:
+                            n = graph.nodes.get(pfx)
+                            neighbors.append(n.name if n else pfx)
+                hint = ", ".join(sorted(set(neighbors)))
+                self.result = {
+                    "ok": False,
+                    "error": f"[{node.prefix}] is a stub node (short prefix "
+                             f"from 1-byte trace). Login to a neighbor to "
+                             f"discover its full identity: {hint}",
+                }
+                return
+
             print(f"  === {action.upper()}: "
                   f"{node.name} [{node.prefix}] ===")
 
@@ -460,16 +482,21 @@ class NodeCommander:
     async def _async_disc_path(self, config, graph, target_prefix,
                                topology_file):
         """Send disc_path flood and return firmware's route with analysis."""
-        from meshcore_optimizer.radio import connect_radio, find_contact
-        from meshcore_optimizer.discovery import (
-            _decode_path_hops, _resolve_hop, _trace_repeater,
+        from meshcore_optimizer.radio import (
+            connect_radio, find_contact, build_contact_map,
         )
-        from meshcore_optimizer.topology import widest_path
+        from meshcore_optimizer.discovery import (
+            _decode_path_hops, _resolve_hop, _is_endpoint_prefix,
+            analyze_and_probe_flood,
+        )
         from meshcore import EventType
 
         node = graph.get_node(target_prefix)
         if not node:
             return {"ok": False, "error": f"Node {target_prefix} not found"}
+
+        comp_node = graph.get_node(config.companion_prefix)
+        companion = comp_node.prefix if comp_node else config.companion_prefix
 
         mc = await connect_radio(config.radio)
         try:
@@ -506,166 +533,47 @@ class NodeCommander:
                 finally:
                     sub.unsubscribe()
 
-                # Decode firmware path
-                out_path = ev.payload.get("out_path", "")
-                in_path = ev.payload.get("in_path", "")
+                out_path_hex = ev.payload.get("out_path", "")
+                in_path_hex = ev.payload.get("in_path", "")
                 out_hlen = ev.payload.get("out_path_hash_len", 1)
                 in_hlen = ev.payload.get("in_path_hash_len", 1)
 
-                out_hops = _decode_path_hops(out_path, out_hlen)
-                in_hops = _decode_path_hops(in_path, in_hlen)
-                out_resolved = [_resolve_hop(h, graph) for h in out_hops]
-                in_resolved = [_resolve_hop(h, graph) for h in in_hops]
-
-                comp_node = graph.get_node(config.companion_prefix)
-                companion = comp_node.prefix if comp_node else config.companion_prefix
-
-                # Build full paths: companion → hops → target
-                # Deduplicate: firmware hops may include companion or target
-                def build_fw_path(hop_list, resolved_list):
-                    middle = [r for r in resolved_list
-                              if r and r != companion and r != node.prefix]
-                    full = [companion] + middle + [node.prefix]
-                    # Remove consecutive duplicates (hash collisions)
-                    deduped = [full[0]]
-                    for p in full[1:]:
-                        if p != deduped[-1]:
-                            deduped.append(p)
-                    full = deduped
-                    names = []
-                    path_prefixes = []
-                    bottleneck = None
-                    missing_edges = []
-
-                    for pfx in full:
-                        n = graph.nodes.get(pfx)
-                        names.append(n.name if n else f"[{pfx[:4]}]")
-                        path_prefixes.append(pfx)
-
-                    for i in range(len(full) - 1):
-                        a, b = full[i], full[i + 1]
-                        if not a or not b or a == b:
-                            continue
-                        edge = graph.get_edge(a, b)
-                        rev = graph.get_edge(b, a)
-                        if edge:
-                            snr = edge.snr_db
-                            if bottleneck is None or snr < bottleneck:
-                                bottleneck = snr
-                        elif rev:
-                            snr = rev.snr_db - 2.0
-                            if bottleneck is None or snr < bottleneck:
-                                bottleneck = snr
-                        else:
-                            missing_edges.append({
-                                "from": a, "to": b,
-                                "from_name": graph.nodes[a].name if a in graph.nodes else a[:4],
-                                "to_name": graph.nodes[b].name if b in graph.nodes else b[:4],
-                            })
-
-                    return {
-                        "path": path_prefixes,
-                        "path_names": names,
-                        "hop_count": len(full) - 1,
-                        "bottleneck_snr": round(bottleneck, 2) if bottleneck is not None else None,
-                        "missing_edges": missing_edges,
-                    }
-
+                # Build display info for the web UI response
                 result = {"ok": True, "node": node.prefix, "name": node.name}
 
-                if out_hops or not out_path:
-                    out_info = build_fw_path(out_hops, out_resolved)
-                    is_direct = not out_path
-                    if is_direct:
-                        out_info = {"path": [companion, node.prefix],
-                                    "path_names": [comp_node.name if comp_node else companion[:4], node.name],
-                                    "hop_count": 1, "bottleneck_snr": None, "missing_edges": []}
-                        e = graph.get_edge(companion, node.prefix)
-                        if e:
-                            out_info["bottleneck_snr"] = round(e.snr_db, 2)
-                    result["out_path"] = out_info
-                    label = "direct" if is_direct else " -> ".join(out_info["path_names"])
-                    print(f"  RX out: {label}")
+                for direction, path_hex, hlen, is_out in [
+                    ("out_path", out_path_hex, out_hlen, True),
+                    ("in_path", in_path_hex, in_hlen, False),
+                ]:
+                    hops = _decode_path_hops(path_hex, hlen)
+                    resolved = [_resolve_hop(h, graph) for h in hops]
+                    # in_path is target→companion; reverse to
+                    # companion→target so both paths are consistent
+                    if not is_out:
+                        hops = list(reversed(hops))
+                        resolved = list(reversed(resolved))
+                    result[direction] = self._build_disc_path_info(
+                        graph, companion, comp_node, node,
+                        path_hex, hops, resolved, is_out)
 
-                if in_hops or not in_path:
-                    in_info = build_fw_path(in_hops, in_resolved)
-                    is_direct = not in_path
-                    if is_direct:
-                        in_info = {"path": [node.prefix, companion],
-                                   "path_names": [node.name, comp_node.name if comp_node else companion[:4]],
-                                   "hop_count": 1, "bottleneck_snr": None, "missing_edges": []}
-                        e = graph.get_edge(node.prefix, companion)
-                        if e:
-                            in_info["bottleneck_snr"] = round(e.snr_db, 2)
-                    result["in_path"] = in_info
-                    label = "direct" if is_direct else " -> ".join(in_info["path_names"])
-                    print(f"  RX in:  {label}")
+                # Build contact map and probe missing edges
+                # using shared function from discovery.py
+                contact_map, _ = build_contact_map(mc)
 
-                # Collect all missing edge pairs
-                all_missing = set()
-                for key in ("out_path", "in_path"):
-                    for me in result.get(key, {}).get("missing_edges", []):
-                        pair = tuple(sorted([me["from"], me["to"]]))
-                        all_missing.add(pair)
+                def _save():
+                    graph.save(topology_file)
 
-                if all_missing:
-                    print(f"  Missing edges: {len(all_missing)} — probing...")
-                    probed = 0
-                    for pa, pb in all_missing:
-                        na = graph.nodes.get(pa)
-                        nb = graph.nodes.get(pb)
-                        if not na or not nb:
-                            continue
-                        print(f"    Probe: {na.name} [{pa[:4]}] "
-                              f"↔ {nb.name} [{pb[:4]}]")
+                new_edges = await analyze_and_probe_flood(
+                    mc, graph, companion, node.prefix,
+                    contact_map, config.discovery_timeout,
+                    config.discovery_delay,
+                    config.discovery_infer_penalty,
+                    out_path_hex, in_path_hex,
+                    out_hlen=out_hlen, in_hlen=in_hlen,
+                    on_save=_save)
 
-                        hp = config.discovery_hop_penalty
-                        path_to_a = widest_path(
-                            graph, companion, pa, hop_penalty=hp)
-                        if not path_to_a.found:
-                            path_to_b = widest_path(
-                                graph, companion, pb, hop_penalty=hp)
-                            if not path_to_b.found:
-                                print(f"      Neither reachable")
-                                continue
-                            path_to_a = path_to_b
-                            pa, pb = pb, pa
-
-                        # Skip if path to via is too long
-                        if path_to_a.hop_count > 4:
-                            print(f"      Path too long ({path_to_a.hop_count}h)")
-                            continue
-
-                        ADDR_HEX = 4
-                        via_hops = [p[:ADDR_HEX].lower()
-                                    for p in path_to_a.path]
-                        target_hop = pb[:ADDR_HEX].lower()
-                        fwd = via_hops + [target_hop]
-                        trace_addrs = fwd + list(reversed(fwd[:-1]))
-                        forced = ",".join(trace_addrs)
-
-                        probe_ct = (find_contact(mc, pb) or
-                                    find_contact(mc, pa))
-                        if not probe_ct:
-                            continue
-
-                        ok_t, t_edges, err_t = await _trace_repeater(
-                            mc, probe_ct, companion, pb,
-                            graph, config.discovery_timeout,
-                            forced_trace_path=forced)
-
-                        if ok_t and t_edges > 0:
-                            print(f"      +{t_edges} edges!")
-                            graph.infer_reverse_edges(
-                                config.discovery_infer_penalty)
-                            graph.save(topology_file)
-                            probed += t_edges
-                        elif err_t:
-                            print(f"      {err_t}")
-
-                        await asyncio.sleep(2)
-
-                    result["edges_probed"] = probed
+                if new_edges > 0:
+                    result["edges_probed"] = new_edges
 
                 return result
 
@@ -675,6 +583,71 @@ class NodeCommander:
 
         finally:
             await mc.disconnect()
+
+    @staticmethod
+    def _build_disc_path_info(graph, companion, comp_node, node,
+                              path_hex, hops, resolved, is_out):
+        """Build display info dict for one direction of a disc_path result."""
+        if not hops:
+            # Direct path (no intermediaries)
+            if is_out:
+                src, dst = companion, node.prefix
+                src_name = comp_node.name if comp_node else companion[:4]
+                dst_name = node.name
+            else:
+                src, dst = node.prefix, companion
+                src_name = node.name
+                dst_name = comp_node.name if comp_node else companion[:4]
+            info = {
+                "path": [src, dst], "path_names": [src_name, dst_name],
+                "hop_count": 1, "bottleneck_snr": None, "missing_edges": [],
+            }
+            e = graph.get_edge(src, dst)
+            if e:
+                info["bottleneck_snr"] = round(e.snr_db, 2)
+            return info
+
+        # Filter endpoint hops, keep intermediaries
+        from meshcore_optimizer.discovery import _is_endpoint_prefix
+        intermediates = [r for r in resolved
+                         if r and not _is_endpoint_prefix(r, companion, node.prefix)]
+        full = [companion] + intermediates + [node.prefix]
+        if not is_out:
+            full = list(reversed(full))
+
+        names = []
+        bottleneck = None
+        missing_edges = []
+        for pfx in full:
+            n = graph.nodes.get(pfx)
+            names.append(n.name if n else f"[{pfx[:4]}]")
+        for i in range(len(full) - 1):
+            a, b = full[i], full[i + 1]
+            if not a or not b or a == b:
+                continue
+            edge = graph.get_edge(a, b)
+            rev_edge = graph.get_edge(b, a)
+            if edge:
+                snr = edge.snr_db
+                if bottleneck is None or snr < bottleneck:
+                    bottleneck = snr
+            elif rev_edge:
+                snr = rev_edge.snr_db - 2.0
+                if bottleneck is None or snr < bottleneck:
+                    bottleneck = snr
+            else:
+                missing_edges.append({
+                    "from": a, "to": b,
+                    "from_name": graph.nodes[a].name if a in graph.nodes else a[:4],
+                    "to_name": graph.nodes[b].name if b in graph.nodes else b[:4],
+                })
+        return {
+            "path": full,
+            "path_names": names,
+            "hop_count": len(full) - 1,
+            "bottleneck_snr": round(bottleneck, 2) if bottleneck is not None else None,
+            "missing_edges": missing_edges,
+        }
 
     async def _do_status_only(self, mc, contact, node, pw_list,
                               config, graph, topology_file):
@@ -776,6 +749,7 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 

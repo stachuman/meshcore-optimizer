@@ -51,6 +51,22 @@ def find_contact(mc, prefix):
     return None
 
 
+def build_contact_map(mc):
+    """Build prefix→contact and prefix→name dicts from mc.contacts.
+    Returns (contact_map, name_map)."""
+    contact_map = {}
+    name_map = {}
+    for pub_key, ct in mc.contacts.items():
+        if not isinstance(ct, dict):
+            continue
+        pfx = pub_key[:8].upper()
+        if not pfx:
+            continue
+        contact_map[pfx] = ct
+        name_map[pfx] = ct.get('adv_name', '') or f"[{pfx}]"
+    return contact_map, name_map
+
+
 async def set_contact_path(mc, contact, path_result):
     """Set routing path on a contact from a PathResult."""
     if not path_result.found:

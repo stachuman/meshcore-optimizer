@@ -171,11 +171,48 @@ class NetworkGraph:
 
     def add_node(self, node: RepeaterNode):
         """Add or update a repeater node."""
+        # Check for short-prefix stub that matches this full prefix
+        if len(node.prefix) >= 8:
+            self._merge_short_prefix(node)
         self.nodes[node.prefix] = node
         if node.prefix not in self.edges:
             self.edges[node.prefix] = []
         if node.prefix not in self.reverse_edges:
             self.reverse_edges[node.prefix] = []
+
+    def _merge_short_prefix(self, full_node: RepeaterNode):
+        """Merge a short-prefix stub into this full-prefix node.
+
+        When we first see a node via a 1-byte flood hash (e.g. "F1"),
+        a stub is created. Later when we learn the full prefix "F1A3BCDE"
+        (via neighbors, trace, etc.), repoint all edges and remove the stub.
+        """
+        full = full_node.prefix.upper()
+        # Find stubs: nodes whose prefix is a proper prefix of full
+        stubs = [p for p in self.nodes
+                 if len(p) < len(full) and full.startswith(p)]
+        for old in stubs:
+            # Transfer node data from stub if the full node is blank
+            stub_node = self.nodes[old]
+            if full_node.name == f"[{full}]" and stub_node.name != f"[{old}]":
+                full_node.name = stub_node.name
+
+            # Repoint outgoing edges
+            for edge in self.edges.pop(old, []):
+                edge.from_prefix = full
+                self.edges.setdefault(full, []).append(edge)
+                # Update _edge_set
+                self._edge_set.discard((old, edge.to_prefix))
+                self._edge_set.add((full, edge.to_prefix))
+
+            # Repoint incoming edges (in other nodes' edge lists)
+            for edge in self.reverse_edges.pop(old, []):
+                edge.to_prefix = full
+                self.reverse_edges.setdefault(full, []).append(edge)
+                self._edge_set.discard((edge.from_prefix, old))
+                self._edge_set.add((edge.from_prefix, full))
+
+            del self.nodes[old]
 
     def get_node(self, prefix_or_name: str) -> Optional[RepeaterNode]:
         """Find node by prefix (case-insensitive) or name (partial match)."""

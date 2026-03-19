@@ -1312,24 +1312,24 @@ function showSelectedPaths(fwd, fi, rev, ri) {
     pathLines = [];
     resetNodeStyles();
 
-    // Draw non-selected forward alts (thin, dashed)
+    // Draw non-selected forward alts (thin, dashed, no labels)
     for (let i = fwd.length - 1; i >= 0; i--) {
         if (i === fi) continue;
-        drawPathLine(fwd[i], '#aaaaaa', 2, '6,4', 0.3);
+        drawPathLine(fwd[i], '#aaaaaa', 2, '6,4', 0.3, 0);
     }
-    // Draw non-selected return alts (thin, dashed)
+    // Draw non-selected return alts (thin, dashed, no labels)
     for (let i = rev.length - 1; i >= 0; i--) {
         if (i === ri) continue;
-        drawPathLine(rev[i], '#ff66aa', 2, '6,4', 0.3);
+        drawPathLine(rev[i], '#ff66aa', 2, '6,4', 0.3, 0);
     }
-    // Draw selected return (thick, solid, pink)
+    // Draw selected return (thick, solid, pink, labels offset toward end)
     if (rev[ri]) {
-        drawPathLine(rev[ri], '#ff66aa', 4, null, 0.8);
+        drawPathLine(rev[ri], '#ff66aa', 4, null, 0.8, 0.65);
         for (const pfx of rev[ri].path) highlightNode(pfx, true);
     }
-    // Draw selected forward on top (thick, solid, cyan)
+    // Draw selected forward on top (thick, solid, cyan, labels offset toward start)
     if (fwd[fi]) {
-        drawPathLine(fwd[fi], '#00d4ff', 5, null, 0.9);
+        drawPathLine(fwd[fi], '#00d4ff', 5, null, 0.9, 0.35);
         for (const pfx of fwd[fi].path) highlightNode(pfx, true);
     }
 }
@@ -1349,7 +1349,8 @@ function resetNodeStyles() {
     }
 }
 
-function drawPathLine(pathResult, color, weight, dashArray, opacity) {
+function drawPathLine(pathResult, color, weight, dashArray, opacity, labelPos) {
+    // labelPos: 0 = no labels, 0.0-1.0 = position along edge (0.35 toward start, 0.65 toward end)
     const coords = [];
     for (const pfx of pathResult.path) {
         const node = topo.nodes[pfx];
@@ -1360,18 +1361,24 @@ function drawPathLine(pathResult, color, weight, dashArray, opacity) {
     const line = L.polyline(coords, {
         color, weight, opacity, dashArray, lineCap:'round', lineJoin:'round',
     });
-    for (let i = 0; i < coords.length - 1; i++) {
-        const edge = pathResult.edges[i];
-        if (!edge) continue;
-        const snr = edge.snr_db;
-        const label = L.marker([(coords[i][0]+coords[i+1][0])/2, (coords[i][1]+coords[i+1][1])/2], {
-            icon: L.divIcon({
-                className: '',
-                html: `<div style="background:${color};color:#fff;font-size:11px;padding:1px 4px;border-radius:3px;white-space:nowrap;transform:translate(-50%,-50%)">${snr>=0?'+':''}${snr.toFixed(1)}</div>`,
-                iconSize: [0,0],
-            }), interactive: false,
-        });
-        label.addTo(map); pathLines.push(label);
+    if (labelPos > 0) {
+        const t = labelPos;
+        for (let i = 0; i < coords.length - 1; i++) {
+            const edge = pathResult.edges[i];
+            if (!edge) continue;
+            const snr = edge.snr_db;
+            const lat = coords[i][0] * (1-t) + coords[i+1][0] * t;
+            const lon = coords[i][1] * (1-t) + coords[i+1][1] * t;
+            const txt = (snr>=0?'+':'') + snr.toFixed(1);
+            const label = L.marker([lat, lon], {
+                icon: L.divIcon({
+                    className: '',
+                    html: `<div style="color:${color};font-size:14px;font-weight:bold;white-space:nowrap;transform:translate(-50%,-50%);text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff,0 0 6px #fff">${txt}</div>`,
+                    iconSize: [0,0],
+                }), interactive: false,
+            });
+            label.addTo(map); pathLines.push(label);
+        }
     }
     line.addTo(map); pathLines.push(line);
 }
