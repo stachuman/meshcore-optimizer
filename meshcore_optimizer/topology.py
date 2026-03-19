@@ -143,12 +143,14 @@ class DirectedEdge:
     """
     from_prefix: str       # source node prefix
     to_prefix: str         # destination node prefix
-    snr_db: float          # signal-to-noise ratio in dB
+    snr_db: float          # signal-to-noise ratio in dB (latest measurement)
     source: str            # how we learned this: "neighbors", "advert",
                            #   "trace", "manual", "inferred"
     timestamp: str = ""    # when this was measured
     confidence: float = 1.0  # 0.0-1.0, decays with age
     last_heard_ago: int = 0  # seconds since last heard (from neighbors)
+    snr_min_db: float = None   # worst observed SNR (None = not yet tracked)
+    observation_count: int = 1 # how many times this edge has been measured
 
 
 class NetworkGraph:
@@ -225,6 +227,12 @@ class NetworkGraph:
                 existing_prio = source_priority.get(existing.source, 0)
                 new_prio = source_priority.get(edge.source, 0)
 
+                # Track SNR min across all observations
+                prev_min = existing.snr_min_db if existing.snr_min_db is not None else existing.snr_db
+                new_snr = edge.snr_db
+                existing.snr_min_db = min(prev_min, new_snr)
+                existing.observation_count += 1
+
                 if new_prio >= existing_prio:
                     existing.snr_db = edge.snr_db
                     existing.source = edge.source
@@ -233,6 +241,9 @@ class NetworkGraph:
                     existing.last_heard_ago = edge.last_heard_ago
                 return
         else:
+            # New edge — initialize snr_min_db if not set
+            if edge.snr_min_db is None:
+                edge.snr_min_db = edge.snr_db
             self._edge_set.add(pair)
             self.edges[edge.from_prefix].append(edge)
             if edge.to_prefix not in self.reverse_edges:
@@ -545,7 +556,7 @@ class NetworkGraph:
             data["nodes"][prefix] = nd
         for from_p, edges in self.edges.items():
             for edge in edges:
-                data["edges"].append({
+                ed = {
                     "from": edge.from_prefix,
                     "to": edge.to_prefix,
                     "snr_db": round(edge.snr_db, 2),
@@ -553,7 +564,12 @@ class NetworkGraph:
                     "timestamp": edge.timestamp,
                     "confidence": edge.confidence,
                     "last_heard_ago": edge.last_heard_ago,
-                })
+                }
+                if edge.snr_min_db is not None:
+                    ed["snr_min_db"] = round(edge.snr_min_db, 2)
+                if edge.observation_count > 1:
+                    ed["observation_count"] = edge.observation_count
+                data["edges"].append(ed)
 
         with open(filename, 'w') as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -588,6 +604,8 @@ class NetworkGraph:
                 timestamp=ed.get("timestamp", ""),
                 confidence=ed.get("confidence", 1.0),
                 last_heard_ago=ed.get("last_heard_ago", 0),
+                snr_min_db=ed.get("snr_min_db"),
+                observation_count=ed.get("observation_count", 1),
             ))
 
         return graph
@@ -921,7 +939,12 @@ def print_topology_report(graph: NetworkGraph):
                 to_name = graph.nodes[e.to_prefix].name if e.to_prefix in graph.nodes else e.to_prefix
                 quality = "✅" if e.snr_db >= 5 else ("⚠️" if e.snr_db >= 0 else "❌")
                 src_tag = f" [{e.source}]" if e.source != "neighbors" else ""
-                print(f"       → {to_name:<25} {e.snr_db:>+6.1f} dB {quality}{src_tag}")
+                var_tag = ""
+                if e.snr_min_db is not None and e.observation_count > 1:
+                    spread = abs(e.snr_db - e.snr_min_db)
+                    if spread >= 0.5:
+                        var_tag = f" (min {e.snr_min_db:+.1f}, {e.observation_count}x)"
+                print(f"       → {to_name:<25} {e.snr_db:>+6.1f} dB {quality}{src_tag}{var_tag}")
 
         if not outgoing:
             print(f"     (no outgoing link data)")
@@ -951,9 +974,14 @@ def print_path_result(result: PathResult, graph: NetworkGraph):
         quality = "✅" if edge.snr_db >= 5 else ("⚠️" if edge.snr_db >= 0 else "❌")
         is_bottleneck = " ← BOTTLENECK" if edge.snr_db == result.bottleneck_snr else ""
         src_tag = f" ({edge.source})" if edge.source != "neighbors" else ""
+        var_tag = ""
+        if edge.snr_min_db is not None and edge.observation_count > 1:
+            spread = abs(edge.snr_db - edge.snr_min_db)
+            if spread >= 0.5:
+                var_tag = f"  [min {edge.snr_min_db:+.1f}, {edge.observation_count}x]"
 
         print(f"  {from_name}")
-        print(f"    ──{edge.snr_db:>+6.1f} dB──→  {quality} {bar}{is_bottleneck}{src_tag}")
+        print(f"    ──{edge.snr_db:>+6.1f} dB──→  {quality} {bar}{is_bottleneck}{src_tag}{var_tag}")
 
     print(f"  {result.path_names[-1]}")
 

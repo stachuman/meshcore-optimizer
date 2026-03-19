@@ -267,7 +267,8 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
 async def _login_and_neighbors(mc, contact, node, password_entry,
                                graph, timeout, name_map=None,
                                contact_map=None,
-                               max_login_wait=None):
+                               max_login_wait=None,
+                               neighbor_max_age_s=None):
     """
     Try guest login + fetch neighbor table via binary API.
     Returns (success, edges_added, error_msg, password_used).
@@ -326,11 +327,24 @@ async def _login_and_neighbors(mc, contact, node, password_entry,
                 existing = graph.get_node(prefix)
                 name = (existing.name if existing and not existing.name.startswith("[")
                         else (name_map or {}).get(prefix, f"[{prefix}]"))
-                print(f"        {name:<25} {snr:>+6.1f} dB  ({secs}s ago)")
+
+                stale = neighbor_max_age_s and secs > neighbor_max_age_s
+                tag = "  STALE" if stale else ""
+                print(f"        {name:<25} {snr:>+6.1f} dB  ({secs}s ago){tag}")
+
+            # Filter out stale neighbors
+            fresh = neighbours
+            if neighbor_max_age_s:
+                fresh = [n for n in neighbours
+                         if n.get("secs_ago", 0) <= neighbor_max_age_s]
+                skipped = len(neighbours) - len(fresh)
+                if skipped:
+                    print(f"      Skipped {skipped} stale neighbor(s) "
+                          f"(>{neighbor_max_age_s/3600:.0f}h)")
 
             edges_before = graph.stats()['edges']
             graph.add_from_neighbors_api(
-                node.prefix, neighbours,
+                node.prefix, fresh,
                 timestamp=datetime.now().isoformat(timespec='seconds')
             )
             n_edges = graph.stats()['edges'] - edges_before
@@ -382,7 +396,8 @@ class _DiscoveryCtx:
                  ds, passwords, default_guest_passwords, timeout, delay,
                  infer_penalty, radio_config, save_file, state_file,
                  alt_snr_gap=10.0, probe_distance_km=2.0,
-                 probe_min_snr=-5.0):
+                 probe_min_snr=-5.0,
+                 neighbor_max_age_s=None):
         self.mc = mc
         self.graph = graph
         self.companion_prefix = companion_prefix
@@ -400,6 +415,7 @@ class _DiscoveryCtx:
         self.alt_snr_gap = alt_snr_gap
         self.probe_distance_km = probe_distance_km
         self.probe_min_snr = probe_min_snr
+        self.neighbor_max_age_s = neighbor_max_age_s
 
     def fix_names(self):
         """Update node names and locations from contact data."""
@@ -495,7 +511,8 @@ async def _run_round0(ctx: _DiscoveryCtx):
         ok, n_edges, err, used_pw = await _login_and_neighbors(
             ctx.mc, companion_contact, comp_node, pw, ctx.graph,
             ctx.timeout, name_map=ctx.name_map,
-            contact_map=ctx.contact_map)
+            contact_map=ctx.contact_map,
+            neighbor_max_age_s=ctx.neighbor_max_age_s)
 
         if err == "CONNECTION_LOST":
             if ctx.radio_config:
@@ -741,7 +758,8 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
                         ctx.mc, contact, node, pw,
                         ctx.graph, ctx.timeout,
                         name_map=ctx.name_map,
-                        contact_map=ctx.contact_map)
+                        contact_map=ctx.contact_map,
+                        neighbor_max_age_s=ctx.neighbor_max_age_s)
 
                 if err == "CONNECTION_LOST":
                     if ctx.radio_config:
@@ -1190,7 +1208,8 @@ async def progressive_discovery(mc, graph: NetworkGraph,
                                 default_guest_passwords: list = None,
                                 radio_config: RadioConfig = None,
                                 probe_distance_km: float = 2.0,
-                                probe_min_snr: float = -5.0):
+                                probe_min_snr: float = -5.0,
+                                neighbor_max_age_h: float = 48.0):
     """
     Run progressive topology discovery.
 
@@ -1304,6 +1323,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
         state_file=state_file,
         probe_distance_km=probe_distance_km,
         probe_min_snr=probe_min_snr,
+        neighbor_max_age_s=neighbor_max_age_h * 3600 if neighbor_max_age_h else None,
     )
 
     stopped = False
@@ -1583,6 +1603,7 @@ Examples:
                 radio_config=config.radio,
                 probe_distance_km=config.discovery_probe_distance_km,
                 probe_min_snr=config.discovery_probe_min_snr,
+                neighbor_max_age_h=config.discovery_neighbor_max_age_h,
             )
         finally:
             await mc.disconnect()

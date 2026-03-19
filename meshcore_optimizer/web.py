@@ -169,6 +169,7 @@ class DiscoveryRunner:
                         radio_config=config.radio,
                         probe_distance_km=config.discovery_probe_distance_km,
                         probe_min_snr=config.discovery_probe_min_snr,
+                        neighbor_max_age_h=config.discovery_neighbor_max_age_h,
                     )
                 finally:
                     await mc.disconnect()
@@ -803,11 +804,16 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         edges = []
         for from_p, edge_list in graph.edges.items():
             for e in edge_list:
-                edges.append({
+                ed = {
                     "from": e.from_prefix, "to": e.to_prefix,
                     "snr_db": round(e.snr_db, 2),
                     "source": e.source, "confidence": e.confidence,
-                })
+                }
+                if e.snr_min_db is not None:
+                    ed["snr_min_db"] = round(e.snr_min_db, 2)
+                if e.observation_count > 1:
+                    ed["observation_count"] = e.observation_count
+                edges.append(ed)
         return {
             "nodes": nodes, "edges": edges,
             "companion_prefix": self.companion_prefix,
@@ -1042,6 +1048,8 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
                 "hop_count": pr.hop_count,
                 "edges": [{"from": e.from_prefix, "to": e.to_prefix,
                            "snr_db": round(e.snr_db, 2),
+                           "snr_min_db": round(e.snr_min_db, 2) if e.snr_min_db is not None else None,
+                           "observation_count": e.observation_count,
                            "source": e.source,
                            "confidence": round(e.confidence, 2)}
                           for e in pr.edges],

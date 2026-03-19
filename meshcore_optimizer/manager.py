@@ -925,6 +925,7 @@ def run_live_discovery(state: AppState):
                 radio_config=state.config.radio,
                 probe_distance_km=state.config.discovery_probe_distance_km,
                 probe_min_snr=state.config.discovery_probe_min_snr,
+                neighbor_max_age_h=state.config.discovery_neighbor_max_age_h,
             )
             state.modified = False  # saved by progressive_discovery
         except KeyboardInterrupt:

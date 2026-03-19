@@ -327,7 +327,11 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
                 <label class="field">Save File</label>
                 <input id="cfgSaveFile" value="topology.json">
             </div>
-            <div></div>
+            <div>
+                <label class="field">Neighbor Max Age (h)</label>
+                <input id="cfgNeighborMaxAge" type="number" value="48" step="1">
+                <div class="hint">Ignore neighbors not seen within this many hours.</div>
+            </div>
         </div>
     </div>
 
@@ -680,8 +684,12 @@ function renderTopology(data) {
         );
 
         let popup = `<b>${escHtml(fromN.name)}</b> ↔ <b>${escHtml(toN.name)}</b><br><table>`;
-        popup += `<tr><td>${escHtml(fromN.name)} →</td><td class="${snrClass(e.snr_db)}">${e.snr_db >= 0?'+':''}${e.snr_db.toFixed(1)} dB</td><td>[${e.source}]</td></tr>`;
-        if (rev) popup += `<tr><td>${escHtml(toN.name)} →</td><td class="${snrClass(rev.snr_db)}">${rev.snr_db >= 0?'+':''}${rev.snr_db.toFixed(1)} dB</td><td>[${rev.source}]</td></tr>`;
+        let fwdMin = (e.snr_min_db != null && e.observation_count > 1) ? ` <small>(min ${e.snr_min_db >= 0?'+':''}${e.snr_min_db.toFixed(1)}, ${e.observation_count}x)</small>` : '';
+        popup += `<tr><td>${escHtml(fromN.name)} →</td><td class="${snrClass(e.snr_db)}">${e.snr_db >= 0?'+':''}${e.snr_db.toFixed(1)} dB${fwdMin}</td><td>[${e.source}]</td></tr>`;
+        if (rev) {
+            let revMin = (rev.snr_min_db != null && rev.observation_count > 1) ? ` <small>(min ${rev.snr_min_db >= 0?'+':''}${rev.snr_min_db.toFixed(1)}, ${rev.observation_count}x)</small>` : '';
+            popup += `<tr><td>${escHtml(toN.name)} →</td><td class="${snrClass(rev.snr_db)}">${rev.snr_db >= 0?'+':''}${rev.snr_db.toFixed(1)} dB${revMin}</td><td>[${rev.source}]</td></tr>`;
+        }
         else popup += `<tr><td>${escHtml(toN.name)} →</td><td style="color:#666">unknown</td></tr>`;
         popup += `</table>`;
         line.bindPopup(popup);
@@ -1232,9 +1240,14 @@ function pathDetailHtml(pr) {
     for (const e of pr.edges) {
         const fn = topo.nodes[e.from];
         const si = srcIcons[e.source] || '?';
+        let snrExtra = '';
+        if (e.snr_min_db != null && e.observation_count > 1) {
+            const spread = Math.abs(e.snr_db - e.snr_min_db);
+            if (spread >= 0.5) snrExtra = ` <span style="color:#8899aa;font-size:9px" title="min ${fmtSnr(e.snr_min_db)}, ${e.observation_count}x">\u0394${spread.toFixed(0)}</span>`;
+        }
         html += `<tr><td>${escHtml(fn?fn.name:e.from)} [${e.from.substring(0,4)}]</td><td>\u2192</td>`;
-        html += `<td class="${snrClass(e.snr_db)}">${fmtSnr(e.snr_db)}</td>`;
-        html += `<td style="color:#667;font-size:10px;padding-left:4px" title="${e.source||''}, conf ${e.confidence||''}">${si}</td></tr>`;
+        html += `<td class="${snrClass(e.snr_db)}">${fmtSnr(e.snr_db)}${snrExtra}</td>`;
+        html += `<td style="color:#667;font-size:10px;padding-left:4px" title="${e.source||''}, conf ${e.confidence||''}, ${e.observation_count||1}x">${si}</td></tr>`;
     }
     html += '</table>';
     if (pr.node_health) {
@@ -1526,6 +1539,7 @@ function populateSettingsForm(cfg) {
     document.getElementById('cfgProbeDist').value = disc.probe_distance_km ?? 2.0;
     document.getElementById('cfgProbeMinSnr').value = disc.probe_min_snr ?? -5.0;
     document.getElementById('cfgSaveFile').value = disc.save_file || 'topology.json';
+    document.getElementById('cfgNeighborMaxAge').value = disc.neighbor_max_age_h ?? 48;
 
     // Health penalties
     const hp = cfg.health_penalties || {};
@@ -1600,6 +1614,7 @@ function buildConfigFromForm() {
             probe_distance_km: f('cfgProbeDist') ?? 2.0,
             probe_min_snr: f('cfgProbeMinSnr') ?? -5.0,
             save_file: v('cfgSaveFile') || 'topology.json',
+            neighbor_max_age_h: f('cfgNeighborMaxAge') || 48,
         },
         passwords: passwords,
         default_guest_passwords: guestPws,

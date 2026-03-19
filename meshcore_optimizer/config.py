@@ -114,6 +114,7 @@ class Config:
     discovery_hop_penalty: float = 1.0
     discovery_probe_distance_km: float = 2.0
     discovery_probe_min_snr: float = -5.0
+    discovery_neighbor_max_age_h: float = 48.0
     passwords: list = None
     default_guest_passwords: list = None
     health_penalties: dict = None
@@ -170,6 +171,7 @@ def load_config(filename: str) -> Config:
         discovery_hop_penalty=disc.get("hop_penalty", 1.0),
         discovery_probe_distance_km=disc.get("probe_distance_km", 2.0),
         discovery_probe_min_snr=disc.get("probe_min_snr", -5.0),
+        discovery_neighbor_max_age_h=disc.get("neighbor_max_age_h", 48.0),
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
                                          DEFAULT_GUEST_PASSWORDS),
@@ -200,6 +202,10 @@ def save_config(config: Config, filename: str):
             "delay": config.discovery_delay,
             "infer_penalty": config.discovery_infer_penalty,
             "save_file": config.discovery_save_file,
+            "hop_penalty": config.discovery_hop_penalty,
+            "probe_distance_km": config.discovery_probe_distance_km,
+            "probe_min_snr": config.discovery_probe_min_snr,
+            "neighbor_max_age_h": config.discovery_neighbor_max_age_h,
         },
         "passwords": [
             {"name": pw.name, "prefix": pw.prefix,
