@@ -918,6 +918,57 @@ def widest_path_alternatives(graph: NetworkGraph, source_prefix: str,
     return results
 
 
+def round_trip_bottleneck(graph: NetworkGraph, path_result: PathResult) -> float:
+    """Compute the round-trip bottleneck SNR for a path.
+    For each edge A→B in the path, considers min(snr(A→B), snr(B→A)).
+    Returns the worst such value across all edges."""
+    if not path_result.found or path_result.hop_count == 0:
+        return float('-inf')
+    worst = float('inf')
+    for i in range(len(path_result.path) - 1):
+        a, b = path_result.path[i], path_result.path[i + 1]
+        fwd = graph.get_edge(a, b)
+        rev = graph.get_edge(b, a)
+        fwd_snr = fwd.snr_db if fwd else float('-inf')
+        rev_snr = rev.snr_db if rev else fwd_snr - 2.0  # inferred penalty
+        worst = min(worst, fwd_snr, rev_snr)
+    return worst if worst != float('inf') else float('-inf')
+
+
+def best_bidirectional_path(graph: NetworkGraph,
+                            source: str, dest: str,
+                            **kwargs) -> PathResult:
+    """Find the path with the best round-trip bottleneck.
+    Computes forward (source→dest) and reverse (dest→source) widest paths,
+    then picks the one whose worst bidirectional edge is best."""
+    fwd = widest_path(graph, source, dest, **kwargs)
+    rev = widest_path(graph, dest, source, **kwargs)
+
+    if not fwd.found and not rev.found:
+        return fwd
+
+    fwd_rt = round_trip_bottleneck(graph, fwd) if fwd.found else float('-inf')
+    rev_rt = round_trip_bottleneck(graph, rev) if rev.found else float('-inf')
+
+    if rev_rt > fwd_rt and rev.found:
+        # Use reverse path but flip it so it's source→dest
+        rev_path = list(reversed(rev.path))
+        rev_names = list(reversed(rev.path_names))
+        rev_edges = []
+        for i in range(len(rev_path) - 1):
+            e = graph.get_edge(rev_path[i], rev_path[i + 1])
+            if e:
+                rev_edges.append(e)
+        return PathResult(
+            source=source, destination=dest,
+            path=rev_path, path_names=rev_names,
+            bottleneck_snr=rev_rt,
+            hop_count=len(rev_path) - 1,
+            edges=rev_edges, found=True,
+        )
+    return fwd
+
+
 def all_pairs_widest(graph: NetworkGraph,
                      min_snr_threshold: float = -15.0) -> dict:
     """

@@ -1064,7 +1064,13 @@ function panelFindPath() {
     const to = document.getElementById('selTo').value;
     if (!from || !to) { document.getElementById('path-result').innerHTML =
         `<span style="color:#f44336">Select both nodes</span>`; return; }
-    clearPath();
+    // Clear map visuals but keep the from/to selections
+    _lastPathData = null;
+    pathLines.forEach(l => map.removeLayer(l));
+    pathLines = [];
+    clearTraceLines();
+    resetNodeStyles();
+    document.getElementById('path-result').innerHTML = '';
     pathFrom = from;
     pathTo = to;
     highlightNode(from, true);

@@ -36,7 +36,7 @@ from typing import Optional
 
 from meshcore_optimizer.topology import (
     NetworkGraph, RepeaterNode, DirectedEdge, PathResult,
-    widest_path, widest_path_alternatives,
+    widest_path, widest_path_alternatives, best_bidirectional_path,
     print_topology_report, print_path_result,
     print_all_pairs_report, all_pairs_widest,
 )
@@ -88,7 +88,7 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
     Returns (success, edges_added, error_msg).
     """
     from meshcore import EventType
-    from meshcore_optimizer.topology import widest_path
+    from meshcore_optimizer.topology import best_bidirectional_path
 
     ADDR_HEX = 4  # 2 bytes = 4 hex chars
 
@@ -96,10 +96,12 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
         trace_path = forced_trace_path
         print(f"      Forced path: {trace_path}")
         # Build a dummy path_result for hash resolution
-        path_result = widest_path(graph, companion_prefix, target_prefix)
+        path_result = best_bidirectional_path(graph, companion_prefix,
+                                              target_prefix)
     else:
-        # Get route from graph (widest path)
-        path_result = widest_path(graph, companion_prefix, target_prefix)
+        # Get route from graph (best bidirectional path)
+        path_result = best_bidirectional_path(graph, companion_prefix,
+                                              target_prefix)
 
         if path_result.found and len(path_result.path) >= 2:
             hops = [p[:ADDR_HEX].lower() for p in path_result.path]
@@ -718,7 +720,7 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
             node, ctx.passwords, ctx.default_guest_passwords)
         if not pw_list:
             continue
-        pr = widest_path(ctx.graph, ctx.companion_prefix, prefix)
+        pr = best_bidirectional_path(ctx.graph, ctx.companion_prefix, prefix)
         if not pr.found or pr.bottleneck_snr < MIN_LOGIN_SNR:
             continue
         login_candidates.append((prefix, pw_list, pr))
@@ -927,7 +929,7 @@ async def _run_proximity_probe(ctx: _DiscoveryCtx):
 
         # If primary direction failed, try reverse (B → A instead of A → B)
         # Route through target_node to reach via_node
-        path_to_target = widest_path(
+        path_to_target = best_bidirectional_path(
             ctx.graph, ctx.companion_prefix, target_node.prefix)
         if not found and path_to_target.found:
             rev_via = target_node

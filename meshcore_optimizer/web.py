@@ -283,7 +283,10 @@ class NodeCommander:
         from meshcore_optimizer.config import load_config, Config, match_passwords
         from meshcore_optimizer.radio import connect_radio
         from meshcore_optimizer.discovery import _login_and_neighbors, _trace_repeater
-        from meshcore_optimizer.topology import NetworkGraph, widest_path
+        from meshcore_optimizer.topology import (
+            NetworkGraph, widest_path, round_trip_bottleneck,
+            best_bidirectional_path,
+        )
 
         log_capture = _LogCapture(_discovery._log)
         old_stdout = sys.stdout
@@ -363,7 +366,29 @@ class NodeCommander:
             comp_node = graph.get_node(config.companion_prefix)
             companion = comp_node.prefix if comp_node else config.companion_prefix
 
-            path_result = widest_path(graph, companion, node.prefix)
+            fwd_path = widest_path(graph, companion, node.prefix)
+            rev_path = widest_path(graph, node.prefix, companion)
+            fwd_rt = round_trip_bottleneck(graph, fwd_path) if fwd_path.found else float('-inf')
+            rev_rt = round_trip_bottleneck(graph, rev_path) if rev_path.found else float('-inf')
+
+            if fwd_path.found:
+                fwd_str = " -> ".join(fwd_path.path_names)
+                print(f"  Fwd: {fwd_str} "
+                      f"({fwd_path.bottleneck_snr:+.1f} dB, "
+                      f"round-trip {fwd_rt:+.1f} dB)")
+            if rev_path.found:
+                rev_str = " -> ".join(rev_path.path_names)
+                print(f"  Rev: {rev_str} "
+                      f"({rev_path.bottleneck_snr:+.1f} dB, "
+                      f"round-trip {rev_rt:+.1f} dB)")
+
+            path_result = best_bidirectional_path(graph, companion,
+                                                     node.prefix)
+            if path_result.found:
+                choice = "fwd" if fwd_rt >= rev_rt else "rev"
+                print(f"  Using {choice} path "
+                      f"({path_result.bottleneck_snr:+.1f} dB, "
+                      f"{path_result.hop_count} hops)")
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
