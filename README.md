@@ -141,6 +141,28 @@ Options:
 --interactive, -i       Manual data entry mode (no radio needed)
 ```
 
+### Scheduled Discovery
+
+Run discovery automatically via systemd timer (daily at 2:00 AM):
+
+```bash
+sudo cp systemd/meshcore-discovery.service systemd/meshcore-discovery.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now meshcore-discovery.timer
+```
+
+Manual trigger (non-blocking):
+```bash
+sudo systemctl start meshcore-discovery.service --no-block
+```
+
+Monitor:
+```bash
+journalctl -u meshcore-discovery.service -f   # live logs
+ls logs/discovery_*.log                        # log files (30-day retention)
+sudo systemctl list-timers meshcore-discovery  # next scheduled run
+```
+
 ### Path Computation
 
 Compute optimal routes from an existing topology file:
@@ -186,6 +208,8 @@ For the complete technical description, see **[Discovery Process & Routing Algor
 ```
 web.py                            Start the web map server
 tui.py                            Start the text UI manager
+run_discovery.sh                  Automated discovery (for systemd timer)
+systemd/                          systemd service and timer unit files
 
 meshcore_optimizer/               Core package
     constants.py                  Shared constants and defaults

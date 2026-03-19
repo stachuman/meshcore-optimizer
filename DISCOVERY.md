@@ -216,6 +216,18 @@ Mesh packets travel both directions (send and acknowledge), so both link directi
 
 The `-2.0 dB` softening for inferred edges prevents excessive double-penalization. Without it, a 5 dB infer penalty combined with `min()` creates a devastating compound penalty on partially-measured links.
 
+### Best Bidirectional Path
+
+When routing to a node for login or trace, the effective SNR table above handles most cases — but it evaluates edges individually. Two paths may have identical forward bottleneck yet very different return quality. `best_bidirectional_path()` addresses this:
+
+1. Compute forward widest path (source → dest)
+2. Compute reverse widest path (dest → source)
+3. For each path, evaluate **round-trip bottleneck**: the worst `min(fwd_snr, rev_snr)` across all edges
+4. Pick the path with the better round-trip bottleneck
+5. If the reverse path wins, flip it to source → dest order
+
+This is used for trace routing, login routing, and gap probes — any operation where a response must traverse the path back. Target selection and reachability checks still use plain `widest_path`.
+
 ### Hop Penalty
 
 Each hop subtracts `hop_penalty` dB (default 1.0, configurable) from the path score:
