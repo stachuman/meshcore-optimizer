@@ -18,6 +18,7 @@ import asyncio
 import http.server
 import io
 import json
+import logging
 import os
 import re
 import socket
@@ -114,10 +115,11 @@ class DiscoveryRunner:
         from meshcore_optimizer.discovery import progressive_discovery
         from meshcore_optimizer.topology import NetworkGraph
 
-        # Capture print output
+        # Capture print + logging output
         log_capture = _LogCapture(self._log)
         old_stdout = sys.stdout
         sys.stdout = log_capture
+        log_capture.install()
 
         try:
             # Load config
@@ -196,6 +198,7 @@ class DiscoveryRunner:
             self.status = "error"
             self.error = str(e)
         finally:
+            log_capture.uninstall()
             sys.stdout = old_stdout
 
 
@@ -206,8 +209,21 @@ class _LogCapture(io.TextIOBase):
         self._cb = callback
         self._buf = ""
         self._real = sys.__stdout__
+        # Also capture logging output (meshcore lib uses logging → stderr)
+        self._log_handler = _LogCaptureHandler(callback)
 
     _TERMINAL_NOISE = re.compile(r'\x1b\[[IO]')
+
+    def install(self):
+        """Start capturing stdout and logging."""
+        logging.getLogger().addHandler(self._log_handler)
+
+    def uninstall(self):
+        """Stop capturing logging; flush remaining buffer."""
+        logging.getLogger().removeHandler(self._log_handler)
+        if self._buf:
+            self._cb(self._buf)
+            self._buf = ""
 
     def write(self, s):
         if self._real:
@@ -224,6 +240,21 @@ class _LogCapture(io.TextIOBase):
     def flush(self):
         if self._real:
             self._real.flush()
+
+
+class _LogCaptureHandler(logging.Handler):
+    """Logging handler that forwards log records to a callback."""
+
+    def __init__(self, callback):
+        super().__init__()
+        self._cb = callback
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            self._cb(msg)
+        except Exception:
+            pass
 
 
 def _close_loop(loop):
@@ -255,8 +286,11 @@ class NodeCommander:
         self.busy = False
         self.result = None
 
-    def start(self, action, target_prefix, config_file, topology_file):
-        """Start a command. Returns immediately."""
+    def start(self, action, target_prefix, config_file, topology_file,
+              route_override=None):
+        """Start a command. Returns immediately.
+        route_override: optional hex path like '5364,ee9f,3924,ea87' to use
+        instead of computing best_bidirectional_path."""
         with self._lock:
             if self.busy:
                 return False, "Another command is running"
@@ -267,7 +301,8 @@ class NodeCommander:
 
         t = threading.Thread(
             target=self._run_thread,
-            args=(action, target_prefix, config_file, topology_file),
+            args=(action, target_prefix, config_file, topology_file,
+                  route_override),
             daemon=True,
         )
         t.start()
@@ -279,18 +314,20 @@ class NodeCommander:
             return None
         return self.result
 
-    def _run_thread(self, action, target_prefix, config_file, topology_file):
+    def _run_thread(self, action, target_prefix, config_file, topology_file,
+                    route_override=None):
         from meshcore_optimizer.config import load_config, Config, match_passwords
         from meshcore_optimizer.radio import connect_radio
         from meshcore_optimizer.discovery import _login_and_neighbors, _trace_repeater
         from meshcore_optimizer.topology import (
-            NetworkGraph, widest_path, round_trip_bottleneck,
+            NetworkGraph, PathResult, widest_path, round_trip_bottleneck,
             best_bidirectional_path,
         )
 
         log_capture = _LogCapture(_discovery._log)
         old_stdout = sys.stdout
         sys.stdout = log_capture
+        log_capture.install()
 
         try:
             config = Config()
@@ -366,29 +403,56 @@ class NodeCommander:
             comp_node = graph.get_node(config.companion_prefix)
             companion = comp_node.prefix if comp_node else config.companion_prefix
 
-            fwd_path = widest_path(graph, companion, node.prefix)
-            rev_path = widest_path(graph, node.prefix, companion)
-            fwd_rt = round_trip_bottleneck(graph, fwd_path) if fwd_path.found else float('-inf')
-            rev_rt = round_trip_bottleneck(graph, rev_path) if rev_path.found else float('-inf')
+            if route_override:
+                # Build PathResult from user-specified hex route
+                hops = [h.strip() for h in route_override.split(",")]
+                path_prefixes = []
+                path_names = []
+                for h in hops:
+                    n = graph.get_node(h)
+                    if n:
+                        path_prefixes.append(n.prefix)
+                        path_names.append(n.name)
+                    else:
+                        path_prefixes.append(h.upper())
+                        path_names.append(f"[{h}]")
+                route_str = " -> ".join(
+                    f"{nm} [{pf[:4]}]"
+                    for nm, pf in zip(path_names, path_prefixes))
+                print(f"  Manual route: {route_str}")
+                path_result = PathResult(
+                    source=path_prefixes[0],
+                    destination=path_prefixes[-1],
+                    path=path_prefixes,
+                    path_names=path_names,
+                    bottleneck_snr=0.0,
+                    hop_count=len(path_prefixes) - 1,
+                    edges=[], found=True,
+                )
+            else:
+                fwd_path = widest_path(graph, companion, node.prefix)
+                rev_path = widest_path(graph, node.prefix, companion)
+                fwd_rt = round_trip_bottleneck(graph, fwd_path) if fwd_path.found else float('-inf')
+                rev_rt = round_trip_bottleneck(graph, rev_path) if rev_path.found else float('-inf')
 
-            if fwd_path.found:
-                fwd_str = " -> ".join(fwd_path.path_names)
-                print(f"  Fwd: {fwd_str} "
-                      f"({fwd_path.bottleneck_snr:+.1f} dB, "
-                      f"round-trip {fwd_rt:+.1f} dB)")
-            if rev_path.found:
-                rev_str = " -> ".join(rev_path.path_names)
-                print(f"  Rev: {rev_str} "
-                      f"({rev_path.bottleneck_snr:+.1f} dB, "
-                      f"round-trip {rev_rt:+.1f} dB)")
+                if fwd_path.found:
+                    fwd_str = " -> ".join(fwd_path.path_names)
+                    print(f"  Fwd: {fwd_str} "
+                          f"({fwd_path.bottleneck_snr:+.1f} dB, "
+                          f"round-trip {fwd_rt:+.1f} dB)")
+                if rev_path.found:
+                    rev_str = " -> ".join(rev_path.path_names)
+                    print(f"  Rev: {rev_str} "
+                          f"({rev_path.bottleneck_snr:+.1f} dB, "
+                          f"round-trip {rev_rt:+.1f} dB)")
 
-            path_result = best_bidirectional_path(graph, companion,
-                                                     node.prefix)
-            if path_result.found:
-                choice = "fwd" if fwd_rt >= rev_rt else "rev"
-                print(f"  Using {choice} path "
-                      f"({path_result.bottleneck_snr:+.1f} dB, "
-                      f"{path_result.hop_count} hops)")
+                path_result = best_bidirectional_path(graph, companion,
+                                                         node.prefix)
+                if path_result.found:
+                    choice = "fwd" if fwd_rt >= rev_rt else "rev"
+                    print(f"  Using {choice} path "
+                          f"({path_result.bottleneck_snr:+.1f} dB, "
+                          f"{path_result.hop_count} hops)")
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -402,6 +466,7 @@ class NodeCommander:
         except Exception as e:
             self.result = {"ok": False, "error": str(e)}
         finally:
+            log_capture.uninstall()
             sys.stdout = old_stdout
             _discovery._log(f"--- done ---")
             with self._lock:
@@ -416,12 +481,15 @@ class NodeCommander:
 
         mc = await connect_radio(config.radio)
         try:
+            print(f"  Loading contacts...")
             await mc.ensure_contacts(follow=True)
 
             contact = find_contact(mc, node.prefix)
             if not contact:
+                print(f"  ERROR: No contact found for {node.name} [{node.prefix}]")
                 return {"ok": False, "error": f"No contact for {node.name}"}
 
+            print(f"  Setting path on contact...")
             await set_contact_path(mc, contact, path_result)
 
             pw_list = match_passwords(
@@ -430,6 +498,12 @@ class NodeCommander:
             # For single-node commands, limit password attempts to
             # avoid long waits (each attempt can take 10s+ over radio)
             pw_list = pw_list[:2]
+
+            pw_desc = ", ".join(
+                f"'{p.password}'" if p.password else "(blank)"
+                for p in pw_list) or "none"
+            print(f"  Passwords to try: {pw_desc}")
+            print(f"  Starting {action}...")
 
             if action == "status":
                 return await self._do_status_only(
@@ -491,7 +565,8 @@ class NodeCommander:
 
             if ok and t_edges > 0:
                 graph.infer_reverse_edges(config.discovery_infer_penalty)
-                graph.save(topology_file)
+            # Save on success (new edges) or failure (updated fail_penalty)
+            graph.save(topology_file)
 
             s = graph.stats()
             return {
@@ -528,6 +603,7 @@ class NodeCommander:
             await mc.ensure_contacts(follow=True)
             contact = find_contact(mc, node.prefix)
             if not contact:
+                print(f"  ERROR: No contact found for {node.name} [{node.prefix}]")
                 return {"ok": False, "error": f"No contact for {node.name}"}
 
             path_queue = asyncio.Queue()
@@ -812,6 +888,9 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
                     ed["snr_min_db"] = round(e.snr_min_db, 2)
                 if e.observation_count > 1:
                     ed["observation_count"] = e.observation_count
+                if e.fail_penalty > 0:
+                    ed["fail_penalty"] = round(e.fail_penalty, 1)
+                    ed["fail_count"] = e.fail_count
                 edges.append(ed)
         return {
             "nodes": nodes, "edges": edges,
@@ -977,6 +1056,7 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         body = self._read_post_body()
         action = body.get("action", "")
         target = body.get("prefix", "")
+        route = body.get("route", None)  # optional hex path override
         if action not in ("status", "neighbors"):
             self._send_json({"ok": False, "error": "action must be 'status' or 'neighbors'"}, 400)
             return
@@ -986,6 +1066,7 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
         ok, msg = _commander.start(
             action, target,
             self.config_file, self.topology_file,
+            route_override=route,
         )
         self._send_json({"ok": ok, "message": msg})
 

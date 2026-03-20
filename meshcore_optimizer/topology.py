@@ -151,6 +151,8 @@ class DirectedEdge:
     last_heard_ago: int = 0  # seconds since last heard (from neighbors)
     snr_min_db: float = None   # worst observed SNR (None = not yet tracked)
     observation_count: int = 1 # how many times this edge has been measured
+    fail_count: int = 0        # consecutive trace failures through this edge
+    fail_penalty: float = 0.0  # accumulated penalty from failures (dB)
 
 
 class NetworkGraph:
@@ -276,6 +278,9 @@ class NetworkGraph:
                     existing.timestamp = edge.timestamp
                     existing.confidence = edge.confidence
                     existing.last_heard_ago = edge.last_heard_ago
+                    # Fresh measurement clears failure state
+                    existing.fail_count = 0
+                    existing.fail_penalty = 0.0
                 return
         else:
             # New edge — initialize snr_min_db if not set
@@ -297,6 +302,31 @@ class NetworkGraph:
             if e.to_prefix == to_prefix:
                 return e
         return None
+
+    # --- Trace failure tracking ---
+
+    FAIL_PENALTY_DB = 3.0   # dB penalty per failure
+    MAX_FAIL_PENALTY = 15.0 # cap to avoid infinite penalty
+
+    def record_path_failure(self, path_prefixes: list[str]):
+        """Record a trace failure along a path.
+        First edge gets full penalty, subsequent edges get half — the first
+        hop is most likely to be the problem when a trace times out."""
+        for i in range(len(path_prefixes) - 1):
+            edge = self.get_edge(path_prefixes[i], path_prefixes[i + 1])
+            if edge:
+                weight = self.FAIL_PENALTY_DB if i == 0 else self.FAIL_PENALTY_DB * 0.5
+                edge.fail_count += 1
+                edge.fail_penalty = min(edge.fail_penalty + weight,
+                                        self.MAX_FAIL_PENALTY)
+
+    def record_path_success(self, path_prefixes: list[str]):
+        """Clear failure state for all edges along a successfully traced path."""
+        for i in range(len(path_prefixes) - 1):
+            edge = self.get_edge(path_prefixes[i], path_prefixes[i + 1])
+            if edge and edge.fail_count > 0:
+                edge.fail_count = 0
+                edge.fail_penalty = 0.0
 
     # --- Topology building from different sources ---
 
@@ -606,6 +636,9 @@ class NetworkGraph:
                     ed["snr_min_db"] = round(edge.snr_min_db, 2)
                 if edge.observation_count > 1:
                     ed["observation_count"] = edge.observation_count
+                if edge.fail_count > 0:
+                    ed["fail_count"] = edge.fail_count
+                    ed["fail_penalty"] = round(edge.fail_penalty, 1)
                 data["edges"].append(ed)
 
         with open(filename, 'w') as f:
@@ -643,6 +676,8 @@ class NetworkGraph:
                 last_heard_ago=ed.get("last_heard_ago", 0),
                 snr_min_db=ed.get("snr_min_db"),
                 observation_count=ed.get("observation_count", 1),
+                fail_count=ed.get("fail_count", 0),
+                fail_penalty=ed.get("fail_penalty", 0.0),
             ))
 
         return graph
@@ -821,6 +856,11 @@ def widest_path(graph: NetworkGraph, source_prefix: str,
             else:
                 # Both measured or both inferred — use weaker
                 effective_snr = min(edge.snr_db, reverse_edge.snr_db)
+
+            # Apply trace failure penalty
+            effective_snr -= edge.fail_penalty
+            if reverse_edge:
+                effective_snr -= reverse_edge.fail_penalty
 
             # Apply node health penalty for intermediate nodes
             if use_node_health and v != dest and v in graph.nodes:

@@ -430,7 +430,8 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
                style="font-family:monospace;font-size:12px">
         <div class="panel-row" style="margin-top:4px">
             <span id="tracePreview" style="font-size:11px;color:#8899aa;flex:1"></span>
-            <button onclick="sendTrace()">Send</button>
+            <button onclick="sendTrace()">Trace</button>
+            <button onclick="sendTraceNeighbors()">Neighbors</button>
         </div>
         <div id="traceResult" style="font-size:12px;margin-top:4px"></div>
     </div>
@@ -572,6 +573,14 @@ function formatUptime(secs) {
 function escHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+function appendLogLine(text) {
+    const logEl = document.getElementById('discovery-log');
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.textContent = text;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+}
 
 // --- Position estimation for no-GPS nodes ---
 function estimatePosition(node, nodes, edges) {
@@ -675,20 +684,23 @@ function renderTopology(data) {
         const rev = edgeLookup[e.to + ':' + e.from];
         const worstSnr = rev ? Math.min(e.snr_db, rev.snr_db) : e.snr_db;
 
+        const hasFail = (e.fail_penalty > 0) || (rev && rev.fail_penalty > 0);
         const line = L.polyline(
             [[fromN._lat, fromN._lon], [toN._lat, toN._lon]],
-            { color: snrColor(worstSnr),
+            { color: hasFail ? '#f44336' : snrColor(worstSnr),
               weight: Math.max(1, Math.min(4, (worstSnr+10)/5)),
-              opacity: 0.4,
-              dashArray: e.source === 'inferred' ? '5,5' : null }
+              opacity: hasFail ? 0.6 : 0.4,
+              dashArray: hasFail ? '6,4' : (e.source === 'inferred' ? '5,5' : null) }
         );
 
         let popup = `<b>${escHtml(fromN.name)}</b> ↔ <b>${escHtml(toN.name)}</b><br><table>`;
         let fwdMin = (e.snr_min_db != null && e.observation_count > 1) ? ` <small>(min ${e.snr_min_db >= 0?'+':''}${e.snr_min_db.toFixed(1)}, ${e.observation_count}x)</small>` : '';
-        popup += `<tr><td>${escHtml(fromN.name)} →</td><td class="${snrClass(e.snr_db)}">${e.snr_db >= 0?'+':''}${e.snr_db.toFixed(1)} dB${fwdMin}</td><td>[${e.source}]</td></tr>`;
+        let fwdFail = e.fail_penalty > 0 ? ` <small style="color:#f44336">(${e.fail_count}x fail, -${e.fail_penalty.toFixed(0)} dB)</small>` : '';
+        popup += `<tr><td>${escHtml(fromN.name)} →</td><td class="${snrClass(e.snr_db)}">${e.snr_db >= 0?'+':''}${e.snr_db.toFixed(1)} dB${fwdMin}${fwdFail}</td><td>[${e.source}]</td></tr>`;
         if (rev) {
             let revMin = (rev.snr_min_db != null && rev.observation_count > 1) ? ` <small>(min ${rev.snr_min_db >= 0?'+':''}${rev.snr_min_db.toFixed(1)}, ${rev.observation_count}x)</small>` : '';
-            popup += `<tr><td>${escHtml(toN.name)} →</td><td class="${snrClass(rev.snr_db)}">${rev.snr_db >= 0?'+':''}${rev.snr_db.toFixed(1)} dB${revMin}</td><td>[${rev.source}]</td></tr>`;
+            let revFail = rev.fail_penalty > 0 ? ` <small style="color:#f44336">(${rev.fail_count}x fail, -${rev.fail_penalty.toFixed(0)} dB)</small>` : '';
+            popup += `<tr><td>${escHtml(toN.name)} →</td><td class="${snrClass(rev.snr_db)}">${rev.snr_db >= 0?'+':''}${rev.snr_db.toFixed(1)} dB${revMin}${revFail}</td><td>[${rev.source}]</td></tr>`;
         }
         else popup += `<tr><td>${escHtml(toN.name)} →</td><td style="color:#666">unknown</td></tr>`;
         popup += `</table>`;
@@ -819,6 +831,10 @@ async function nodeCmd(action, pfx) {
         return;
     }
 
+    // Immediate feedback in log
+    const name = topo && topo.nodes[pfx] ? topo.nodes[pfx].name : pfx;
+    appendLogLine(`>>> ${action}: ${name} [${pfx.substring(0,4)}]`);
+
     // Start polling logs + result
     startDiscPoll();
     if (statusEl) { statusEl.textContent = 'running...'; }
@@ -895,8 +911,9 @@ document.getElementById('traceInput').addEventListener('input', function() {
             const label = L.marker([r.node._lat, r.node._lon], {
                 icon: L.divIcon({
                     className: '',
-                    html: `<div style="background:#e040fb;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;white-space:nowrap;transform:translate(-50%,-150%)">${hops[i]}</div>`,
-                    iconSize: [0,0],
+                    html: `<div style="background:#e040fb;color:#fff;font-size:10px;padding:1px 4px;border-radius:3px;white-space:nowrap">${hops[i]}</div>`,
+                    iconSize: null,
+                    iconAnchor: [14, 28],
                 }), interactive: false,
             });
             label.addTo(map);
@@ -944,6 +961,54 @@ async function sendTrace() {
     } catch (e) {
         resultEl.innerHTML = `<span style="color:#f44336">Error: ${e}</span>`;
     }
+}
+
+async function sendTraceNeighbors() {
+    const path = document.getElementById('traceInput').value.trim();
+    if (!path) return;
+    const hops = path.split(',').map(h => h.trim());
+    // Forward half: first to midpoint (the turnaround hop)
+    const mid = Math.ceil(hops.length / 2);
+    const fwdHops = hops.slice(0, mid);
+    const destHop = fwdHops[fwdHops.length - 1];
+    // Resolve destination prefix
+    const resolved = resolveHop(destHop);
+    const destPfx = resolved ? resolved.pfx : destHop.toUpperCase();
+    const route = fwdHops.join(',');
+
+    const resultEl = document.getElementById('traceResult');
+    resultEl.innerHTML = `<span style="color:#ff9800">Neighbors via ${route}...</span>`;
+
+    try {
+        const resp = await fetch('/api/node/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action: 'neighbors', prefix: destPfx, route }),
+        });
+        const data = await resp.json();
+        if (!data.ok) {
+            resultEl.innerHTML = `<span style="color:#f44336">${data.message || data.error}</span>`;
+            return;
+        }
+    } catch (e) {
+        resultEl.innerHTML = `<span style="color:#f44336">Error: ${e}</span>`;
+        return;
+    }
+    startDiscPoll();
+    const poll = setInterval(async () => {
+        try {
+            const r = await fetch('/api/node/result');
+            const d = await r.json();
+            if (d.busy) return;
+            clearInterval(poll);
+            if (d.ok) {
+                resultEl.innerHTML = `<span style="color:#4caf50">OK (+${d.edges_added || 0} edges)</span>`;
+                refreshTopology();
+            } else {
+                resultEl.innerHTML = `<span style="color:#f44336">${d.error || 'failed'}</span>`;
+            }
+        } catch (e) { clearInterval(poll); }
+    }, 2000);
 }
 
 async function askFirmwarePath() {
@@ -1280,6 +1345,27 @@ function doSmartTrace() {
     if (trace) copyToTrace(trace);
 }
 
+async function doPathNeighbors() {
+    if (!_lastPathData) return;
+    const fwd = _lastPathData.paths || [];
+    const fi = getSelectedIdx('fwdChoice');
+    if (!fwd[fi]) return;
+    const pr = fwd[fi];
+    const destPfx = pr.path[pr.path.length - 1];
+    const route = pathHex(pr);
+    try {
+        const resp = await fetch('/api/node/command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action: 'neighbors', prefix: destPfx, route }),
+        });
+        const data = await resp.json();
+        if (!data.ok) { alert(data.message || data.error); return; }
+    } catch (e) { alert('Error: ' + e); return; }
+    startDiscPoll();
+    _pollNodeResult('neighbors', destPfx, null);
+}
+
 function copyToClipboard(text, btn) {
     const done = () => { if(btn){const orig=btn.textContent;btn.textContent='Copied!';setTimeout(()=>btn.textContent=orig,1500);} };
     const fallback = () => {
@@ -1447,12 +1533,18 @@ function updateDiscUI(data) {
     const startBtn = document.getElementById('btnDiscStart');
     const stopBtn = document.getElementById('btnDiscStop');
 
-    dot.className = 'status-dot ' + data.status;
+    const cmdBusy = data.command_busy;
+    const effectiveStatus = (cmdBusy && data.status === 'idle') ? 'running' : data.status;
+    dot.className = 'status-dot ' + effectiveStatus;
     const labels = { idle:'Idle', running:'Running...', stopping:'Stopping...', completed:'Completed', error:'Error' };
-    text.textContent = labels[data.status] || data.status;
-    if (data.error) text.textContent += ': ' + data.error;
+    if (cmdBusy && data.status !== 'running') {
+        text.textContent = 'Command running...';
+    } else {
+        text.textContent = labels[data.status] || data.status;
+        if (data.error) text.textContent += ': ' + data.error;
+    }
 
-    startBtn.disabled = (data.status === 'running' || data.status === 'stopping');
+    startBtn.disabled = (data.status === 'running' || data.status === 'stopping' || cmdBusy);
     stopBtn.disabled = (data.status !== 'running');
 
     // Append new logs

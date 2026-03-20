@@ -6,15 +6,10 @@ After=network-online.target
 #User=
 #Group=
 Type=oneshot
-WorkingDirectory=/home/staszek/meshcore-optimizer
-ExecStart=/home/staszek/meshcore-optimizer/run_discovery.sh
-TimeoutStartSec=1800
-# Restart on failure with a delay (e.g. radio busy)
-Restart=on-failure
-RestartSec=300
-# Max 2 retries
-StartLimitBurst=2
-StartLimitIntervalSec=3600
+WorkingDirectory=/home/user/meshcore-optimizer
+ExecStart=/home/user/meshcore-optimizer/run_discovery.sh
+TimeoutStartSec=infinity
+Restart=no
 
 [Install]
 WantedBy=default.target

@@ -177,10 +177,18 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
 
         if ev is None:
             print(f"      RX: No trace response (timeout)")
+            if path_result.found:
+                graph.record_path_failure(path_result.path)
             return False, 0, "trace timeout"
         if ev.type == EventType.ERROR:
             print(f"      RX: Trace error: {ev.payload}")
+            if path_result.found:
+                graph.record_path_failure(path_result.path)
             return False, 0, f"trace error: {ev.payload}"
+
+        # Trace got through — clear failure state on this path
+        if path_result.found:
+            graph.record_path_success(path_result.path)
 
         path_nodes = ev.payload.get("path", [])
         if not path_nodes:
