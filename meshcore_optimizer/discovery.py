@@ -93,7 +93,15 @@ async def _trace_repeater(mc, contact, companion_prefix, target_prefix,
     ADDR_HEX = 4  # 2 bytes = 4 hex chars
 
     if forced_trace_path:
-        trace_path = forced_trace_path
+        # Ensure all hops have consistent length — firmware requires it.
+        # If any hop is shorter (1-byte stub), downgrade all to min length.
+        forced_hops = [h.strip() for h in forced_trace_path.split(",")]
+        min_len = min(len(h) for h in forced_hops)
+        if min_len < ADDR_HEX:
+            forced_hops = [h[:min_len] for h in forced_hops]
+            print(f"      Note: downgraded to {min_len//2}-byte hops "
+                  f"(path contains stub node)")
+        trace_path = ",".join(forced_hops)
         print(f"      Forced path: {trace_path}")
         # Build a dummy path_result for hash resolution
         path_result = best_bidirectional_path(graph, companion_prefix,

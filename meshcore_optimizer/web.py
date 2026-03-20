@@ -52,6 +52,7 @@ class DiscoveryRunner:
         self._max_logs = 500
         self.started_at = ""
         self.stopped_at = ""
+        self._log_event = threading.Event()
 
     @property
     def running(self):
@@ -106,6 +107,7 @@ class DiscoveryRunner:
             self.logs.append(line)
             if len(self.logs) > self._max_logs:
                 self.logs = self.logs[-self._max_logs:]
+        self._log_event.set()
 
     def _run_thread(self, config_file, topology_file):
         """Thread entry point — sets up asyncio loop and runs discovery."""
@@ -942,6 +944,8 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             state["logs"] = _discovery.get_logs(since)
             state["command_busy"] = _commander.busy
             self._send_json(state)
+        elif path == "/api/log/stream":
+            self._handle_log_stream(params)
         elif path == "/api/config":
             cfg = self._load_config_dict()
             cfg["config_exists"] = os.path.exists(self.config_file)
@@ -1093,6 +1097,65 @@ class MapHandler(http.server.BaseHTTPRequestHandler):
             self.config_file, self.topology_file,
         )
         self._send_json({"ok": ok, "message": msg})
+
+    def _handle_log_stream(self, params):
+        """Server-Sent Events: push log lines and status in real time."""
+        since = int(params.get("since", ["0"])[0])
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        prev_cmd_busy = _commander.busy
+        idle_count = 0
+
+        try:
+            while True:
+                _discovery._log_event.clear()
+
+                # Send new log lines
+                logs = _discovery.get_logs(since)
+                for line in logs:
+                    since += 1
+                    self.wfile.write(
+                        f"id: {since}\nevent: log\n"
+                        f"data: {json.dumps(line)}\n\n".encode())
+
+                # Build status
+                state = _discovery.get_state()
+                cmd_busy = _commander.busy
+                state["command_busy"] = cmd_busy
+
+                # Include command result when it just finished
+                if prev_cmd_busy and not cmd_busy:
+                    result = _commander.get_result()
+                    if result is not None:
+                        state["command_result"] = result
+                prev_cmd_busy = cmd_busy
+
+                self.wfile.write(
+                    f"event: status\n"
+                    f"data: {json.dumps(state)}\n\n".encode())
+                self.wfile.flush()
+
+                # Close after sustained idle (3 * 0.5s = 1.5s grace)
+                active = state["status"] in ("running", "stopping") \
+                    or cmd_busy
+                if not active and not logs:
+                    idle_count += 1
+                    if idle_count >= 3:
+                        self.wfile.write(b"event: done\ndata: {}\n\n")
+                        self.wfile.flush()
+                        break
+                else:
+                    idle_count = 0
+
+                _discovery._log_event.wait(timeout=0.5)
+
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def _handle_path(self, params):
         src = params.get("from", [""])[0]

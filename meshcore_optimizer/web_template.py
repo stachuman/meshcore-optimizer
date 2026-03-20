@@ -459,7 +459,8 @@ let pathFrom = null, pathTo = null;
 let companionPrefix = '';
 let refreshTimer = null;
 let discLogSince = 0;
-let discPollTimer = null;
+let _logSource = null;
+let _logReconnects = 0;
 const REFRESH_MS = 10000;
 
 // --- Map init ---
@@ -887,7 +888,10 @@ document.getElementById('traceInput').addEventListener('input', function() {
     const hops = val.split(',').map(h => h.trim());
     const resolved = hops.map(resolveHop);
     const names = resolved.map((r, i) => r ? r.node.name : '?');
-    document.getElementById('tracePreview').textContent = names.join(' → ');
+    let preview = names.join(' \u2192 ');
+    const hasStub = hops.some(h => h.length < 4 && h.length > 0);
+    if (hasStub) preview += ' (1-byte stub \u2014 hops will be downgraded)';
+    document.getElementById('tracePreview').textContent = preview;
 
     // Draw on map — only forward half (before return trip)
     const mid = Math.ceil(hops.length / 2);
@@ -966,15 +970,25 @@ async function sendTrace() {
 async function sendTraceNeighbors() {
     const path = document.getElementById('traceInput').value.trim();
     if (!path) return;
+    // Destination from the "To" dropdown
+    const destPfx = document.getElementById('selTo').value;
+    if (!destPfx) {
+        document.getElementById('traceResult').innerHTML =
+            '<span style="color:#f44336">Select destination in "To" dropdown</span>';
+        return;
+    }
+    // Extract forward route: companion → destination (not the full round trip)
     const hops = path.split(',').map(h => h.trim());
-    // Forward half: first to midpoint (the turnaround hop)
-    const mid = Math.ceil(hops.length / 2);
-    const fwdHops = hops.slice(0, mid);
-    const destHop = fwdHops[fwdHops.length - 1];
-    // Resolve destination prefix
-    const resolved = resolveHop(destHop);
-    const destPfx = resolved ? resolved.pfx : destHop.toUpperCase();
-    const route = fwdHops.join(',');
+    const destShort = destPfx.substring(0, 4).toLowerCase();
+    let routeEnd = hops.length;
+    for (let i = 0; i < hops.length; i++) {
+        if (hops[i].toLowerCase().startsWith(destShort) ||
+            destShort.startsWith(hops[i].toLowerCase())) {
+            routeEnd = i + 1;
+            break;
+        }
+    }
+    const route = hops.slice(0, routeEnd).join(',');
 
     const resultEl = document.getElementById('traceResult');
     resultEl.innerHTML = `<span style="color:#ff9800">Neighbors via ${route}...</span>`;
@@ -1500,6 +1514,7 @@ async function discoveryStart() {
         if (data.ok) {
             discLogSince = 0;
             document.getElementById('discovery-log').innerHTML = '';
+            if (_logSource) { _logSource.close(); _logSource = null; }
             startDiscPoll();
         } else {
             alert(data.message);
@@ -1514,17 +1529,31 @@ async function discoveryStop() {
 }
 
 function startDiscPoll() {
-    if (discPollTimer) return;
-    discPollTimer = setInterval(pollDiscovery, 2000);
-    pollDiscovery();
-}
+    if (_logSource) return;
+    _logSource = new EventSource(`/api/log/stream?since=${discLogSince}`);
 
-async function pollDiscovery() {
-    try {
-        const resp = await fetch(`/api/discovery/status?log_since=${discLogSince}`);
-        const data = await resp.json();
-        updateDiscUI(data);
-    } catch (e) {}
+    _logSource.addEventListener('log', function(e) {
+        appendLogLine(JSON.parse(e.data));
+        if (e.lastEventId) discLogSince = parseInt(e.lastEventId);
+    });
+
+    _logSource.addEventListener('status', function(e) {
+        updateDiscUI(JSON.parse(e.data));
+    });
+
+    _logSource.addEventListener('done', function(e) {
+        if (_logSource) { _logSource.close(); _logSource = null; }
+    });
+
+    _logSource.onopen = function() { _logReconnects = 0; };
+
+    _logSource.onerror = function() {
+        if (_logSource) { _logSource.close(); _logSource = null; }
+        if (_logReconnects < 5) {
+            _logReconnects++;
+            setTimeout(startDiscPoll, 1000);
+        }
+    };
 }
 
 function updateDiscUI(data) {
@@ -1546,26 +1575,6 @@ function updateDiscUI(data) {
 
     startBtn.disabled = (data.status === 'running' || data.status === 'stopping' || cmdBusy);
     stopBtn.disabled = (data.status !== 'running');
-
-    // Append new logs
-    if (data.logs && data.logs.length > 0) {
-        const logEl = document.getElementById('discovery-log');
-        for (const line of data.logs) {
-            const div = document.createElement('div');
-            div.className = 'log-line';
-            div.textContent = line;
-            logEl.appendChild(div);
-        }
-        discLogSince += data.logs.length;
-        logEl.scrollTop = logEl.scrollHeight;
-    }
-
-    // Keep polling while discovery runs OR a node command is in progress
-    const busy = data.status === 'running' || data.status === 'stopping'
-                 || data.command_busy;
-    if (!busy) {
-        if (discPollTimer) { clearInterval(discPollTimer); discPollTimer = null; }
-    }
 }
 
 // --- Refresh ---
@@ -1828,10 +1837,15 @@ document.getElementById('settingsModal').addEventListener('click', function(e) {
 // --- Init ---
 refreshTopology();
 toggleAutoRefresh();
-// Check if discovery is already running
-fetch('/api/discovery/status').then(r => r.json()).then(d => {
+// Check if discovery/command is already running
+fetch('/api/discovery/status?log_since=0').then(r => r.json()).then(d => {
     updateDiscUI(d);
-    if (d.status === 'running' || d.status === 'stopping') startDiscPoll();
+    if (d.logs && d.logs.length) {
+        for (const line of d.logs) appendLogLine(line);
+        discLogSince = d.logs.length;
+    }
+    if (d.status === 'running' || d.status === 'stopping' || d.command_busy)
+        startDiscPoll();
 }).catch(() => {});
 // Auto-open setup wizard if no config
 fetch('/api/config').then(r => r.json()).then(cfg => {
