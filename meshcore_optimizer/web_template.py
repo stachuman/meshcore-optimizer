@@ -324,9 +324,16 @@ label { font-size: 13px; color: #8899aa; cursor: pointer; }
                 <div class="hint">Only probe gaps where path is below this. Higher = probe more.</div>
             </div>
             <div>
+                <label class="field">Login Min SNR (dB)</label>
+                <input id="cfgLoginMinSnr" type="number" value="-6.0" step="1">
+                <div class="hint">Skip login if best path SNR is below this threshold.</div>
+            </div>
+            <div>
                 <label class="field">Save File</label>
                 <input id="cfgSaveFile" value="topology.json">
             </div>
+        </div>
+        <div class="row">
             <div>
                 <label class="field">Neighbor Max Age (h)</label>
                 <input id="cfgNeighborMaxAge" type="number" value="48" step="1">
@@ -1652,6 +1659,7 @@ function populateSettingsForm(cfg) {
     document.getElementById('cfgHopPenalty').value = disc.hop_penalty ?? 1.0;
     document.getElementById('cfgProbeDist').value = disc.probe_distance_km ?? 2.0;
     document.getElementById('cfgProbeMinSnr').value = disc.probe_min_snr ?? -5.0;
+    document.getElementById('cfgLoginMinSnr').value = disc.login_min_snr ?? -6.0;
     document.getElementById('cfgSaveFile').value = disc.save_file || 'topology.json';
     document.getElementById('cfgNeighborMaxAge').value = disc.neighbor_max_age_h ?? 48;
 
@@ -1727,6 +1735,7 @@ function buildConfigFromForm() {
             hop_penalty: f('cfgHopPenalty') ?? 1.0,
             probe_distance_km: f('cfgProbeDist') ?? 2.0,
             probe_min_snr: f('cfgProbeMinSnr') ?? -5.0,
+            login_min_snr: f('cfgLoginMinSnr') ?? -6.0,
             save_file: v('cfgSaveFile') || 'topology.json',
             neighbor_max_age_h: f('cfgNeighborMaxAge') || 48,
         },

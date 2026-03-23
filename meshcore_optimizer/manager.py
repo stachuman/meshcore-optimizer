@@ -925,6 +925,7 @@ def run_live_discovery(state: AppState):
                 radio_config=state.config.radio,
                 probe_distance_km=state.config.discovery_probe_distance_km,
                 probe_min_snr=state.config.discovery_probe_min_snr,
+                login_min_snr=state.config.discovery_login_min_snr,
                 neighbor_max_age_h=state.config.discovery_neighbor_max_age_h,
             )
             state.modified = False  # saved by progressive_discovery
@@ -962,6 +963,9 @@ def edit_discovery_params(state: AppState):
         v = prompt(f"  Infer penalty dB ({disc.discovery_infer_penalty}): ")
         if v:
             disc.discovery_infer_penalty = float(v)
+        v = prompt(f"  Login min SNR dB ({disc.discovery_login_min_snr}): ")
+        if v:
+            disc.discovery_login_min_snr = float(v)
         v = prompt(f"  Save file ({disc.discovery_save_file}): ")
         if v:
             disc.discovery_save_file = v

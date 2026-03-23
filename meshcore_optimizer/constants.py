@@ -46,7 +46,7 @@ HOP_HEX_LEN = 4                 # (PATH_HASH_MODE + 1) * 2
 # ---------------------------------------------------------------------------
 
 DEFAULT_GUEST_PASSWORDS = ["", "hello", "password"]
-MIN_LOGIN_SNR = -10.0            # dB threshold for login attempts
+MIN_LOGIN_SNR = -6.0             # dB threshold for login attempts (default)
 MIN_LOGIN_TIMEOUT_S = 10.0       # minimum timeout for login operations
 TRACE_TIMEOUT_MARGIN = 1.2       # multiplier on suggested trace timeout
 NEIGHBOR_FETCH_RETRIES = 4       # max retry count for fetching neighbors

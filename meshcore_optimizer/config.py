@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from meshcore_optimizer.constants import DEFAULT_GUEST_PASSWORDS
+from meshcore_optimizer.constants import DEFAULT_GUEST_PASSWORDS, MIN_LOGIN_SNR
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,7 @@ class Config:
     discovery_hop_penalty: float = 1.0
     discovery_probe_distance_km: float = 2.0
     discovery_probe_min_snr: float = -5.0
+    discovery_login_min_snr: float = MIN_LOGIN_SNR
     discovery_neighbor_max_age_h: float = 48.0
     passwords: list = None
     default_guest_passwords: list = None
@@ -171,6 +172,7 @@ def load_config(filename: str) -> Config:
         discovery_hop_penalty=disc.get("hop_penalty", 1.0),
         discovery_probe_distance_km=disc.get("probe_distance_km", 2.0),
         discovery_probe_min_snr=disc.get("probe_min_snr", -5.0),
+        discovery_login_min_snr=disc.get("login_min_snr", MIN_LOGIN_SNR),
         discovery_neighbor_max_age_h=disc.get("neighbor_max_age_h", 48.0),
         passwords=pw_entries,
         default_guest_passwords=data.get("default_guest_passwords",
@@ -205,6 +207,7 @@ def save_config(config: Config, filename: str):
             "hop_penalty": config.discovery_hop_penalty,
             "probe_distance_km": config.discovery_probe_distance_km,
             "probe_min_snr": config.discovery_probe_min_snr,
+            "login_min_snr": config.discovery_login_min_snr,
             "neighbor_max_age_h": config.discovery_neighbor_max_age_h,
         },
         "passwords": [

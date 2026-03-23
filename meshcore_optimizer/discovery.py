@@ -422,7 +422,7 @@ class _DiscoveryCtx:
                  ds, passwords, default_guest_passwords, timeout, delay,
                  infer_penalty, radio_config, save_file, state_file,
                  alt_snr_gap=10.0, probe_distance_km=2.0,
-                 probe_min_snr=-5.0,
+                 probe_min_snr=-5.0, login_min_snr=MIN_LOGIN_SNR,
                  neighbor_max_age_s=None):
         self.mc = mc
         self.graph = graph
@@ -441,6 +441,7 @@ class _DiscoveryCtx:
         self.alt_snr_gap = alt_snr_gap
         self.probe_distance_km = probe_distance_km
         self.probe_min_snr = probe_min_snr
+        self.login_min_snr = login_min_snr
         self.neighbor_max_age_s = neighbor_max_age_s
 
     def fix_names(self):
@@ -737,7 +738,7 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
         if not pw_list:
             continue
         pr = best_bidirectional_path(ctx.graph, ctx.companion_prefix, prefix)
-        if not pr.found or pr.bottleneck_snr < MIN_LOGIN_SNR:
+        if not pr.found or pr.bottleneck_snr < ctx.login_min_snr:
             continue
         login_candidates.append((prefix, pw_list, pr))
 
@@ -758,6 +759,11 @@ async def _run_login_phase(ctx: _DiscoveryCtx):
         if not alt_paths:
             continue
         alt_paths = ctx.filter_alternatives(alt_paths)
+        # Enforce absolute SNR floor on all paths (including alternatives)
+        alt_paths = [p for p in alt_paths
+                     if p.bottleneck_snr >= ctx.login_min_snr]
+        if not alt_paths:
+            continue
 
         print(f"\n    --- {node.name} [{prefix}] ---")
 
@@ -1398,6 +1404,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
                                 radio_config: RadioConfig = None,
                                 probe_distance_km: float = 2.0,
                                 probe_min_snr: float = -5.0,
+                                login_min_snr: float = MIN_LOGIN_SNR,
                                 neighbor_max_age_h: float = 48.0):
     """
     Run progressive topology discovery.
@@ -1502,6 +1509,7 @@ async def progressive_discovery(mc, graph: NetworkGraph,
         state_file=state_file,
         probe_distance_km=probe_distance_km,
         probe_min_snr=probe_min_snr,
+        login_min_snr=login_min_snr,
         neighbor_max_age_s=neighbor_max_age_h * 3600 if neighbor_max_age_h else None,
     )
 

@@ -173,6 +173,7 @@ class DiscoveryRunner:
                         radio_config=config.radio,
                         probe_distance_km=config.discovery_probe_distance_km,
                         probe_min_snr=config.discovery_probe_min_snr,
+                        login_min_snr=config.discovery_login_min_snr,
                         neighbor_max_age_h=config.discovery_neighbor_max_age_h,
                     )
                 finally:
